@@ -1,0 +1,18 @@
+[package]
+name = "k-pdf-viewer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "k-pdf: a fast, low-memory desktop PDF viewer and editor"
+
+# The application is called k-pdf (the command-line tool is k-pdf-cli).
+[[bin]]
+name = "k-pdf"
+path = "src/main.rs"
+
+[dependencies]
+k-pdf = { path = "..", features = ["render", "compress"] }
+# OpenGL (glow) backend instead of wgpu: smaller binary, lower memory.
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+rfd = "0.17.2"

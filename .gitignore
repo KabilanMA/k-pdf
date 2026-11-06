@@ -1,0 +1,43 @@
+# Rust build output (the workspace's, and any member built on its own)
+/target/
+**/target/
+
+# rustfmt / merge leftovers
+**/*.rs.bk
+*.orig
+*.rej
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local tool settings (Claude Code)
+.claude/settings.local.json
+
+# Files left by test runs and manual checks: PDFs, renders, screenshots,
+# and the viewer's temporary save files (".name.pdf.<pid>.tmp").
+# Test fixtures that should be committed go in tests/fixtures/.
+*.pdf
+!tests/fixtures/**/*.pdf
+*.png
+*.ppm
+*.pnm
+*.tmp
+
+# Profiling and debugging
+perf.data*
+flamegraph.svg
+*.profraw
+
+# Release archives (packaging/linux/package.sh)
+/dist/

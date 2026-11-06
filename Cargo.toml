@@ -1,0 +1,51 @@
+[package]
+name = "k-pdf"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "A small, low-memory PDF library, with a command-line tool (k-pdf-cli)"
+# The `k-pdf` program is the desktop application (in viewer/); the
+# command-line tool built from src/main.rs is `k-pdf-cli`.
+autobins = false
+
+[[bin]]
+name = "k-pdf-cli"
+path = "src/main.rs"
+
+[workspace]
+members = ["viewer"]
+
+[dependencies]
+brotli-decompressor = "5.0.0"
+flate2 = "1.1.11"
+memmap2 = "0.9.12"
+# Compression (feature "compress"): libdeflate and MozJPEG are C libraries,
+# built from source and linked statically.
+brotli = { version = "8.0.2", optional = true }
+libdeflater = { version = "1.26.1", optional = true }
+mozjpeg-sys = { version = "2.2.3", optional = true, default-features = false, features = ["unwinding"] }
+# Rendering (feature "render")
+fontdb = { version = "0.24.0", optional = true, default-features = false, features = ["fs", "memmap", "fontconfig"] }
+jpeg-decoder = { version = "0.3.2", optional = true, default-features = false }
+tiny-skia = { version = "0.12.0", optional = true }
+ttf-parser = { version = "0.25.1", optional = true }
+
+[features]
+default = ["render", "compress"]
+# Page rasterization. Disable with `--no-default-features` for a reader-only build.
+render = ["dep:tiny-skia", "dep:ttf-parser", "dep:jpeg-decoder", "dep:fontdb"]
+# Lossless file compression (`compress`); JPEG results are checked with
+# jpeg-decoder.
+compress = ["dep:brotli", "dep:libdeflater", "dep:mozjpeg-sys", "dep:jpeg-decoder"]
+
+[profile.release]
+lto = "thin"
+
+# Debug builds (`cargo run`) are otherwise far too slow to render pages
+# smoothly: optimize our code a little and dependencies fully.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

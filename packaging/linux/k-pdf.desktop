@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=k-pdf
+GenericName=PDF Viewer
+Comment=View, edit, fill in, redact and compress PDF files
+Exec=k-pdf %f
+Icon=k-pdf
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/pdf;
+Keywords=PDF;viewer;editor;form;redact;compress;
+StartupNotify=true
+StartupWMClass=k-pdf
