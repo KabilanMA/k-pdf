@@ -103,10 +103,20 @@ fn main() -> eframe::Result {
             .with_min_inner_size([420.0, 300.0])
             .with_decorations(titlebar::NATIVE) // we draw our own title bar (not on macOS)
             .with_drag_and_drop(true),
+        // Without vsync, a window the compositor doesn't draw (hidden, or
+        // on a screen that isn't shown) can't hold up the app: with it,
+        // finishing a frame waits for the compositor, which on Wayland
+        // never comes for such a window, and the app freezes. The viewer
+        // only repaints when something changes, and animations ask for
+        // about 60 frames a second (see FRAME).
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
     eframe::run_native("k-pdf", options, Box::new(|cc| Ok(Box::new(Viewer::new(cc, args)))))
 }
+
+/// Time between frames while something moves (about 60 a second).
+pub const FRAME: Duration = Duration::from_millis(16);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fit {
@@ -390,6 +400,9 @@ struct Viewer {
     /// presenter view (remembered while the app runs).
     present: Option<present::Show>,
     presenter_view: bool,
+    /// The "Delete pages" dialog: the pages field, and why it can't be
+    /// used if it can't.
+    delete_dialog: Option<(String, Option<String>)>,
     /// The Print dialog, and a job being prepared and sent.
     print: print::Print,
     printing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
@@ -476,6 +489,7 @@ impl Viewer {
             compressing: None,
             present: None,
             presenter_view: true,
+            delete_dialog: None,
             print: print::Print::default(),
             printing: None,
             theme: egui::ThemePreference::System,
@@ -584,6 +598,90 @@ impl Viewer {
     /// Position of a page in the current order.
     fn position_of(&self, page: usize) -> usize {
         self.order.iter().position(|&p| p == page).unwrap_or(page)
+    }
+
+    /// Deletes the pages at `positions` (one undo step). At least one page
+    /// stays.
+    fn delete_pages(&mut self, positions: &[usize]) {
+        let mut positions: Vec<usize> = positions.iter().copied().filter(|&p| p < self.order.len()).collect();
+        positions.sort_unstable();
+        positions.dedup();
+        if positions.is_empty() {
+            return;
+        }
+        if positions.len() >= self.order.len() {
+            self.error = Some("Can't delete every page: a PDF needs at least one page.".into());
+            return;
+        }
+        self.close_comment();
+        let viewing = self.order.get(self.current_page).copied();
+        let before_current = positions.iter().filter(|&&p| p < self.current_page).count();
+        self.record(Undo::Order(self.order.clone()));
+        for &p in positions.iter().rev() {
+            self.order.remove(p);
+        }
+        self.selection = None;
+        self.back.clear();
+        // Stay on the page being read, or the one now in its place.
+        let target = viewing
+            .and_then(|k| self.order.iter().position(|&x| x == k))
+            .unwrap_or(self.current_page.saturating_sub(before_current))
+            .min(self.order.len() - 1);
+        self.go_to_page(target);
+    }
+
+    /// The "Delete pages" dialog: a list or range of pages.
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some((text, error)) = &mut self.delete_dialog else { return };
+        let count = self.order.len();
+        let parsed = crop::parse_pages(text, count);
+        let mut delete = None;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("delete-pages")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.heading("Delete pages");
+            ui.add_space(8.0);
+            ui.label("Pages to delete:");
+            let field = ui.add(egui::TextEdit::singleline(text).hint_text("e.g. 2, 5-7").desired_width(f32::INFINITY));
+            field.request_focus();
+            let p = theme::palette(ui);
+            match (&parsed, error.as_ref()) {
+                (_, Some(e)) => {
+                    ui.colored_label(p.danger, e.as_str());
+                }
+                (Ok(pages), None) if pages.len() >= count => {
+                    ui.colored_label(p.danger, "That's every page: a PDF needs at least one.");
+                }
+                (Ok(pages), None) => {
+                    let n = pages.len();
+                    ui.label(egui::RichText::new(format!("Deletes {n} of {count} {}. Ctrl+Z brings them back until you save.", if count == 1 { "page" } else { "pages" })).color(p.weak));
+                }
+                (Err(e), None) if !text.trim().is_empty() => {
+                    ui.colored_label(p.weak, e.as_str());
+                }
+                _ => {}
+            }
+            ui.add_space(10.0);
+            let enter = ui.input(|i| i.key_pressed(Key::Enter));
+            ui.horizontal(|ui| {
+                let ok = matches!(&parsed, Ok(pages) if pages.len() < count);
+                if theme::danger_button(ui, "Delete", ok).clicked() || (ok && enter) {
+                    delete = parsed.clone().ok();
+                }
+                if ui.button("Cancel").clicked() {
+                    close = true;
+                }
+            });
+            if field.changed() {
+                *error = None;
+            }
+        });
+        if let Some(positions) = delete {
+            self.delete_dialog = None;
+            self.delete_pages(&positions);
+        } else if close || modal.should_close() {
+            self.delete_dialog = None;
+        }
     }
 
     fn move_page(&mut self, from: usize, to: usize) {
@@ -1068,7 +1166,8 @@ impl Viewer {
     fn comment_rows(&mut self) -> Vec<sidebar::CommentRow> {
         let all = self.comments.all(&self.editor);
         let mut rows = Vec::with_capacity(all.len());
-        for c in all.iter() {
+        let shown: HashSet<usize> = self.order.iter().copied().collect();
+        for c in all.iter().filter(|c| shown.contains(&c.page)) {
             // Pages of the open file have the same key as their index.
             let chars = self.chars.get(&c.page).cloned();
             let excerpt = self.comments.excerpt(c, chars.as_deref().map(|v| v.as_slice()));
@@ -1276,6 +1375,11 @@ impl Viewer {
                 present::Nav::TogglePresenter => {
                     show.presenter = !show.presenter;
                     self.presenter_view = show.presenter;
+                    // Turned on with several screens: the slides move to
+                    // another one.
+                    if show.presenter && show.slides_screen.is_none() && show.screens.len() >= 2 {
+                        show.split();
+                    }
                 }
                 present::Nav::SlidesOn(screen) => show.place(screen),
                 present::Nav::SwapScreens => show.swap_screens(),
@@ -2063,6 +2167,11 @@ impl Viewer {
                 ui.close();
                 self.save_as_dialog(After::Nothing);
             }
+            if ui.button("Delete pages…").on_hover_text("Delete a page, or a list or range of pages").clicked() {
+                ui.close();
+                self.delete_dialog = Some(((self.current_page + 1).to_string(), None));
+            }
+            ui.separator();
             if ui.add(egui::Button::new("Present").shortcut_text("F5")).clicked() {
                 ui.close();
                 self.start_presentation(ui.ctx(), false);
@@ -2522,7 +2631,7 @@ impl Viewer {
             };
             if dy != 0.0 {
                 self.pending_offset = Some(self.last_offset + Vec2::new(0.0, dy * 0.5));
-                ui.ctx().request_repaint();
+                ui.ctx().request_repaint_after(FRAME);
             }
         }
         self.request_pages(ui.ctx(), &visible_positions, ppp);
@@ -2806,7 +2915,10 @@ impl eframe::App for Viewer {
             match action {
                 Some(sidebar::Action::GoTo(pos)) => self.go_to_page(pos),
                 Some(sidebar::Action::Section(LinkTarget::Page { page, top })) => {
-                    self.go_to(self.position_of(page), top)
+                    // (Not to a deleted page.)
+                    if self.order.contains(&page) {
+                        self.go_to(self.position_of(page), top)
+                    }
                 }
                 Some(sidebar::Action::Section(target)) => self.follow_link(ui.ctx(), &target),
                 Some(sidebar::Action::Comment { id, page }) => {
@@ -2817,6 +2929,8 @@ impl eframe::App for Viewer {
                 }
                 Some(sidebar::Action::Move { from, to }) => self.move_page(from, to),
                 Some(sidebar::Action::Insert(pos)) => self.insert_file_dialog(pos),
+                Some(sidebar::Action::Delete(positions)) => self.delete_pages(&positions),
+                Some(sidebar::Action::DeleteDialog(pos)) => self.delete_dialog = Some(((pos + 1).to_string(), None)),
                 None => {}
             }
         }
@@ -2875,6 +2989,7 @@ impl eframe::App for Viewer {
             Some(compress::Action::Open(path)) => self.open(path),
             None => {}
         }
+        self.delete_dialog(&ctx);
         self.info_window(&ctx);
         self.unsaved_prompt(&ctx);
         self.take_screenshot(&ctx);

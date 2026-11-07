@@ -6,7 +6,9 @@
 //! page is outlined and kept in view; clicking a thumbnail goes to it, and
 //! dragging one moves the page. Hovering the gap between two thumbnails (or
 //! above the first, or below the last) shows a "+" button for inserting the
-//! pages of another PDF there.
+//! pages of another PDF there. Hovering a thumbnail shows a delete button;
+//! right-clicking it offers deleting it or a list of pages, and inserting
+//! a PDF before or after it.
 //!
 //! Pages are identified two ways: a *page* is its index in the file (what
 //! thumbnails and renders are keyed by), a *position* is where it currently
@@ -105,6 +107,10 @@ pub enum Action {
     /// Clicked the insert button in the gap before this position (the
     /// number of pages for the gap after the last one).
     Insert(usize),
+    /// Delete the pages at these positions.
+    Delete(Vec<usize>),
+    /// Open the "Delete pages" dialog (from the page at this position).
+    DeleteDialog(usize),
     /// Clicked a section; its page is a page of the open file (not a
     /// position).
     Section(LinkTarget),
@@ -621,6 +627,21 @@ impl Sidebar {
                 on_screen.push(pos);
 
                 let response = ui.interact(item, ui.id().with(("thumb", page)), Sense::click_and_drag());
+                response.context_menu(|ui| {
+                    if ui.button(format!("Delete page {}", pos + 1)).clicked() {
+                        action = Some(Action::Delete(vec![pos]));
+                    }
+                    if ui.button("Delete pages…").on_hover_text("Delete a list or range of pages").clicked() {
+                        action = Some(Action::DeleteDialog(pos));
+                    }
+                    ui.separator();
+                    if ui.button("Insert a PDF before this page…").clicked() {
+                        action = Some(Action::Insert(pos));
+                    }
+                    if ui.button("Insert a PDF after this page…").clicked() {
+                        action = Some(Action::Insert(pos + 1));
+                    }
+                });
                 if self.dragging.is_none() && hovered_gap.is_none() {
                     if response.hovered() {
                         painter.rect_filled(item.shrink(2.0), 8.0, hover_fill);
@@ -644,6 +665,30 @@ impl Sidebar {
                 }
                 if pos == current {
                     painter.rect_stroke(rect.expand(2.0), 4.0, Stroke::new(2.0, accent), StrokeKind::Outside);
+                }
+                // A delete button on the hovered thumbnail (on top of it, so
+                // it gets the click).
+                if self.dragging.is_none() && hovered_gap.is_none() && ui.rect_contains_pointer(item) {
+                    let button = Rect::from_center_size(rect.right_top() + Vec2::new(-14.0, 14.0), Vec2::splat(24.0));
+                    let delete = ui
+                        .interact(button, ui.id().with(("thumb-delete", page)), Sense::click())
+                        .on_hover_text(format!("Delete page {} (Ctrl+Z undoes it)", pos + 1));
+                    let hot = delete.hovered();
+                    painter.circle(
+                        button.center(),
+                        12.0,
+                        if hot { palette.danger } else { palette.raised },
+                        Stroke::new(1.0, palette.border),
+                    );
+                    icons::paint(
+                        &painter,
+                        Rect::from_center_size(button.center(), Vec2::splat(14.0)),
+                        Icon::Trash,
+                        if hot { Color32::WHITE } else { palette.text },
+                    );
+                    if delete.clicked() {
+                        action = Some(Action::Delete(vec![pos]));
+                    }
                 }
                 // Page number; the current page's on an accent pill.
                 let number = painter.layout_no_wrap((pos + 1).to_string(), FontId::proportional(11.5), text_color);
@@ -720,7 +765,7 @@ impl Sidebar {
             if speed != 0.0 {
                 ui.scroll_with_delta(Vec2::new(0.0, speed));
             }
-            ui.ctx().request_repaint();
+            ui.ctx().request_repaint_after(crate::FRAME);
         });
 
         self.request(sizes, order, &on_screen, thumb_w * ppp, pool);

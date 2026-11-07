@@ -13,10 +13,11 @@
 //! shows the current and next slide, the comments on the current page as
 //! speaker notes, the slide number and a timer that can be paused.
 //!
-//! With more than one screen, the presenter view fills the main screen
-//! (the primary one, or the one the viewer was on) and the slides another;
-//! the presenter view can move the slides to another screen or swap them.
-//! With one screen, the slides fill it and the presenter view is a window.
+//! With more than one screen and the presenter view on, the slides fill a
+//! screen other than the main one (the primary one, or the one the viewer
+//! was on) and the presenter view opens maximized where the user is; it
+//! can move the slides to another screen or swap the two. With one screen,
+//! or the presenter view off, the slides fill the current screen.
 
 use std::time::{Duration, Instant};
 
@@ -112,6 +113,10 @@ pub struct Show {
     pub presenter_screen: Option<usize>,
     /// The slides' screen changed: the window must be moved.
     pub move_slides: bool,
+    /// The presenter view goes on `presenter_screen` (only once screens
+    /// were chosen in it: a window put on a screen that isn't shown would
+    /// be lost).
+    pin_presenter: bool,
 }
 
 impl Show {
@@ -136,23 +141,30 @@ impl Show {
             slides_screen: None,
             presenter_screen: None,
             move_slides: false,
+            pin_presenter: false,
         }
     }
 
-    /// Takes the screens: with several, the presenter view goes on the
-    /// main one and the slides on another. Returns whether there are
-    /// several.
+    /// Takes the screens. With several, and the presenter view on, the
+    /// slides go on a screen other than the main one. Returns whether they
+    /// were placed (else the slides fill the current screen).
     pub fn set_screens(&mut self, screens: Vec<Screen>) -> bool {
         self.screens_read = true;
         self.screens = screens;
-        if self.screens.len() < 2 {
+        if self.screens.len() < 2 || !self.presenter {
             return false;
         }
+        self.split();
+        true
+    }
+
+    /// Slides on a screen other than the main one. The presenter view
+    /// stays a normal window, which the desktop opens where the user is.
+    pub fn split(&mut self) {
         let main = self.screens.iter().position(|s| s.main).unwrap_or(0);
         let other = (0..self.screens.len()).find(|&i| i != main).unwrap_or(0);
         self.place(other);
-        self.presenter = true;
-        true
+        self.pin_presenter = false;
     }
 
     /// Slides on screen `slides`, the presenter view on the main screen
@@ -163,6 +175,8 @@ impl Show {
         self.slides_screen = Some(slides);
         self.presenter_screen = Some(presenter);
         self.move_slides = true;
+        // Chosen by the user: the presenter view goes to its screen too.
+        self.pin_presenter = true;
     }
 
     pub fn swap_screens(&mut self) {
@@ -170,6 +184,7 @@ impl Show {
             self.slides_screen = Some(p);
             self.presenter_screen = Some(s);
             self.move_slides = true;
+            self.pin_presenter = true;
         }
     }
 
@@ -302,7 +317,7 @@ pub fn audience(ui: &mut egui::Ui, show: &mut Show, sizes: &[Vec2], texture: &dy
                         }
                     }
                 }
-                ctx.request_repaint();
+                ctx.request_repaint_after(crate::FRAME);
             }
         }
         if !drawn {
@@ -352,7 +367,7 @@ pub fn audience(ui: &mut egui::Ui, show: &mut Show, sizes: &[Vec2], texture: &dy
         let bg = Rect::from_center_size(at, galley.size() + Vec2::new(28.0, 14.0));
         painter.rect_filled(bg, 10.0, Color32::from_black_alpha((170.0 * alpha) as u8));
         painter.galley(at - galley.size() / 2.0, galley, Color32::WHITE);
-        ctx.request_repaint();
+        ctx.request_repaint_after(crate::FRAME);
     }
     navs
 }
@@ -379,8 +394,11 @@ pub fn presenter(
         .with_inner_size([1100.0, 700.0])
         .with_min_inner_size([640.0, 420.0])
         .with_decorations(crate::titlebar::NATIVE);
-    if let Some(screen) = show.presenter_screen.and_then(|i| show.screens.get(i)) {
-        builder = builder.with_monitor(screen.index);
+    match show.presenter_screen.and_then(|i| show.screens.get(i)) {
+        Some(screen) if show.pin_presenter => builder = builder.with_monitor(screen.index),
+        // Several screens: as large as the screen it opens on.
+        Some(_) => builder = builder.with_maximized(true),
+        None => {}
     }
     ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("presenter-view"), builder, |ui, _| {
         let ctx = ui.ctx().clone();
@@ -595,19 +613,26 @@ mod tests {
 
     #[test]
     fn screens_are_placed() {
-        let mut show = Show::new(0, false, 1.0);
+        let mut show = Show::new(0, true, 1.0);
         assert!(!show.set_screens(screens(1, 0)));
         assert_eq!(show.slides_screen, None);
 
+        // Presenter view off: the slides stay on the current screen.
         let mut show = Show::new(0, false, 1.0);
+        assert!(!show.set_screens(screens(2, 1)));
+        assert_eq!(show.slides_screen, None);
+        assert!(!show.presenter);
+
+        let mut show = Show::new(0, true, 1.0);
         assert!(show.set_screens(screens(2, 1)));
         // The presenter view on the main screen, slides on the other.
         assert_eq!((show.slides_screen, show.presenter_screen), (Some(0), Some(1)));
-        assert!(show.presenter && show.move_slides);
+        assert!(show.presenter && show.move_slides && !show.pin_presenter);
         show.swap_screens();
         assert_eq!((show.slides_screen, show.presenter_screen), (Some(1), Some(0)));
+        assert!(show.pin_presenter);
         // Slides on the main screen: the presenter view moves away.
-        let mut show = Show::new(0, false, 1.0);
+        let mut show = Show::new(0, true, 1.0);
         show.set_screens(screens(3, 0));
         show.place(0);
         assert_eq!((show.slides_screen, show.presenter_screen), (Some(0), Some(1)));

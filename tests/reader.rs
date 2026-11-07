@@ -1051,3 +1051,29 @@ fn rotating_pages() {
     assert_eq!(pages[1].rotation(), 270);
     assert_eq!(pages[1].display_size(&saved), (800.0, 600.0));
 }
+
+#[test]
+fn deleted_pages_take_their_form_fields() {
+    // Page 1 has field A; page 2 has field B and a widget of field C,
+    // which also has a widget on page 1.
+    let mut b = Builder::new("1.4");
+    b.obj(1, "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R 6 0 R 7 0 R] >> >>")
+        .obj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 600 800] >>")
+        .obj(3, "<< /Type /Page /Parent 2 0 R /Annots [5 0 R 8 0 R] >>")
+        .obj(4, "<< /Type /Page /Parent 2 0 R /Annots [6 0 R 9 0 R] >>")
+        .obj(5, "<< /FT /Tx /T (A) /Subtype /Widget /Rect [0 0 10 10] /P 3 0 R >>")
+        .obj(6, "<< /FT /Tx /T (B) /V (secret) /Subtype /Widget /Rect [0 0 10 10] /P 4 0 R >>")
+        .obj(7, "<< /FT /Tx /T (C) /Kids [8 0 R 9 0 R] >>")
+        .obj(8, "<< /Parent 7 0 R /Subtype /Widget /Rect [0 0 10 10] /P 3 0 R >>")
+        .obj(9, "<< /Parent 7 0 R /Subtype /Widget /Rect [0 0 10 10] /P 4 0 R >>");
+    let doc = Document::from_bytes(b.finish("/Root 1 0 R")).unwrap();
+    let mut out = Vec::new();
+    k_pdf::write_with_page_order(&doc, &[0], &mut out).unwrap();
+    let text = String::from_utf8_lossy(&out).into_owned();
+    let saved = Document::from_bytes(out).unwrap();
+    let names: Vec<String> = k_pdf::form_fields(&saved).unwrap().iter().map(|f| f.name.clone()).collect();
+    assert_eq!(names, ["A", "C"]);
+    let c = k_pdf::form_fields(&saved).unwrap().into_iter().find(|f| f.name == "C").unwrap();
+    assert_eq!(c.widgets.len(), 1);
+    assert!(!text.contains("secret"));
+}

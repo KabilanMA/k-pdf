@@ -31,6 +31,7 @@ pub enum Icon {
     RotateLeft,
     RotateRight,
     Present,
+    Trash,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -163,6 +164,14 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(8.0, 11.5), (8.0, 14.5)]);
             line(&[(5.0, 14.5), (11.0, 14.5)]);
             painter.add(Shape::convex_polygon(vec![p(6.5, 4.8), p(10.5, 7.0), p(6.5, 9.2)], color, Stroke::NONE));
+        }
+        Icon::Trash => {
+            // A bin with a lid.
+            line(&[(2.5, 4.0), (13.5, 4.0)]);
+            line(&[(6.0, 4.0), (6.5, 2.0), (9.5, 2.0), (10.0, 4.0)]);
+            closed(&[(3.8, 4.0), (12.2, 4.0), (11.3, 14.0), (4.7, 14.0)]);
+            line(&[(6.7, 6.8), (6.9, 11.5)]);
+            line(&[(9.3, 6.8), (9.1, 11.5)]);
         }
         Icon::Document => {
             closed(&[(3.0, 1.0), (10.0, 1.0), (13.5, 4.5), (13.5, 15.0), (3.0, 15.0)]);

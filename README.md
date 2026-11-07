@@ -13,7 +13,7 @@ A fast, lightweight PDF viewer and editor for Linux, Windows and macOS.
 - **Edit text** — click any paragraph and type. The text keeps its font, size and color, and you can change those as in a word processor.
 - **Highlight and comment** — select text to highlight it in one of four colors or comment on it, or drop a note anywhere on a page. The sidebar lists all the comments. They're saved as standard PDF comments, so other PDF readers show them too.
 - **Fill in forms** — text fields, check boxes, radio buttons and lists.
-- **Rearrange pages** — drag thumbnails to reorder pages, or insert another PDF between any two pages.
+- **Rearrange pages** — drag thumbnails to reorder pages, insert another PDF between any two pages, or delete pages: one with the bin button on its thumbnail, or a list like "2, 5-7" with **Delete pages…** in the ⋯ menu.
 - **Crop** — one page, several, or all of them to the same area.
 - **Rotate** — turn one page, a list of pages (like "1, 3-5"), or all of them.
 - **Redact** — black out text, images or areas for good. Select some text and click **Redact** to mark it, or drag over any area. The text under the box is removed from the file, not just covered.

@@ -156,6 +156,16 @@ pub fn write_document_with_options(
             skip.insert(page.id.num);
         }
     }
+    // Form fields that were only on dropped pages go with them.
+    let dropped: HashSet<u32> = all_pages[0]
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| !page_refs.contains_key(&(0, *i)) && p.id.num != 0)
+        .map(|(_, p)| p.id.num)
+        .collect();
+    if !dropped.is_empty() {
+        FieldPruner::new(doc, changes, &dropped, &all_pages[0]).prune(catalog_ref, &mut replace);
+    }
 
     // Only objects still in use are written: whatever edits replaced
     // (old page content, redacted images, earlier edits' objects) must not
@@ -560,6 +570,95 @@ fn deflate(data: &[u8], max: bool) -> io::Result<Vec<u8>> {
 
 /// Inner `/Pages` nodes of the existing page tree (everything except the
 /// root, which is reused).
+/// Removes form fields whose widgets are all on pages left out of the
+/// output (deleted pages), so their names and values don't stay in the
+/// file; fields with widgets on kept pages lose just the others.
+struct FieldPruner<'a> {
+    doc: &'a Document,
+    changes: &'a Changes,
+    dropped: &'a HashSet<u32>,
+    /// Annotations of the dropped pages.
+    gone: HashSet<u32>,
+    seen: HashSet<u32>,
+}
+
+impl<'a> FieldPruner<'a> {
+    fn new(doc: &'a Document, changes: &'a Changes, dropped: &'a HashSet<u32>, pages: &[Page]) -> Self {
+        let mut gone = HashSet::new();
+        for page in pages.iter().filter(|p| dropped.contains(&p.id.num)) {
+            if let Ok(Object::Array(annots)) = doc.get_resolved(&page.dict, b"Annots") {
+                gone.extend(annots.iter().filter_map(Object::as_reference).map(|r| r.num));
+            }
+        }
+        FieldPruner { doc, changes, dropped, gone, seen: HashSet::new() }
+    }
+
+    /// An object as it will be written (with the edits).
+    fn current(&self, r: ObjRef, replace: &HashMap<u32, (ObjRef, Object)>) -> Option<Object> {
+        replace
+            .get(&r.num)
+            .or(self.changes.replace.get(&r.num))
+            .map(|(_, o)| o.clone())
+            .or_else(|| self.changes.added.iter().find(|(a, _)| a.num == r.num).map(|(_, o)| o.clone()))
+            .or_else(|| self.doc.get_object(r).ok())
+    }
+
+    fn prune(&mut self, catalog_ref: ObjRef, replace: &mut HashMap<u32, (ObjRef, Object)>) {
+        let Some(Object::Dictionary(mut catalog)) = self.current(catalog_ref, replace) else { return };
+        let (acro_ref, acro) = match catalog.get(b"AcroForm") {
+            Some(Object::Reference(r)) => (Some(*r), self.current(*r, replace).and_then(|o| o.as_dict().cloned())),
+            Some(Object::Dictionary(d)) => (None, Some(d.clone())),
+            _ => return,
+        };
+        let Some(mut acro) = acro else { return };
+        let Some(fields) = acro.get(b"Fields").and_then(|f| self.doc.resolve(f).ok()).and_then(|f| f.as_array().map(<[Object]>::to_vec))
+        else {
+            return;
+        };
+        let kept: Vec<Object> = fields.iter().filter(|f| self.keep(f, replace, 0)).cloned().collect();
+        if kept.len() == fields.len() {
+            return;
+        }
+        acro.set(b"Fields".to_vec(), Object::Array(kept));
+        match acro_ref {
+            Some(r) => {
+                replace.insert(r.num, (r, Object::Dictionary(acro)));
+            }
+            None => {
+                catalog.set(b"AcroForm".to_vec(), Object::Dictionary(acro));
+                replace.insert(catalog_ref.num, (catalog_ref, Object::Dictionary(catalog)));
+            }
+        }
+    }
+
+    /// Whether a field (or widget) keeps anything on a kept page; trims
+    /// its kids as needed.
+    fn keep(&mut self, field: &Object, replace: &mut HashMap<u32, (ObjRef, Object)>, depth: usize) -> bool {
+        let Object::Reference(r) = field else { return true };
+        if self.gone.contains(&r.num) {
+            return false;
+        }
+        if depth > 32 || !self.seen.insert(r.num) {
+            return true;
+        }
+        let Some(Object::Dictionary(mut dict)) = self.current(*r, replace) else { return true };
+        let kids = dict.get(b"Kids").and_then(|k| self.doc.resolve(k).ok()).and_then(|k| k.as_array().map(<[Object]>::to_vec));
+        let Some(kids) = kids else {
+            // A widget: gone if it is on a dropped page.
+            return !dict.get(b"P").and_then(Object::as_reference).is_some_and(|p| self.dropped.contains(&p.num));
+        };
+        let kept: Vec<Object> = kids.iter().filter(|k| self.keep(k, replace, depth + 1)).cloned().collect();
+        if kept.is_empty() && !kids.is_empty() {
+            return false;
+        }
+        if kept.len() != kids.len() {
+            dict.set(b"Kids".to_vec(), Object::Array(kept));
+            replace.insert(r.num, (*r, Object::Dictionary(dict)));
+        }
+        true
+    }
+}
+
 fn old_tree_nodes(doc: &Document, catalog_ref: &ObjRef, root: ObjRef) -> HashSet<u32> {
     let mut nodes = HashSet::new();
     let mut stack = vec![Object::Reference(root)];

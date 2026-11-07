@@ -12,6 +12,7 @@ USAGE:
     k-pdf-cli object <file.pdf> <num> [gen] [--decode]
     k-pdf-cli render <file.pdf> <page> <out.png> [--scale S] [--dark]
     k-pdf-cli reorder <in.pdf> <out.pdf> <pages>
+    k-pdf-cli delete  <in.pdf> <out.pdf> <pages>
     k-pdf-cli merge   <out.pdf> <in1.pdf> <in2.pdf>...
     k-pdf-cli form    <file.pdf>
     k-pdf-cli outline <file.pdf>
@@ -35,6 +36,7 @@ COMMANDS:
              --dark renders it as dark mode for reading does
     reorder  Save a copy with pages in a new order, e.g. \"3,1,2\" or \"5-10,1-4\"
              (pages left out are dropped)
+    delete   Save a copy without some pages, e.g. \"2\" or \"1,4-6\" (their form fields go too)
     merge    Combine PDFs into one, in the order given
     form     List the form fields with their kinds and values
     outline  List the sections and subsections (bookmarks) with their pages
@@ -67,6 +69,7 @@ fn main() -> ExitCode {
         Some("object") => object(&args[1..]),
         Some("render") => render(&args[1..]),
         Some("reorder") if args.len() == 4 => reorder(&args[1], &args[2], &args[3]),
+        Some("delete") if args.len() == 4 => delete(&args[1], &args[2], &args[3]),
         Some("merge") if args.len() >= 3 => merge(&args[1], &args[2..]),
         Some("form") if args.len() == 2 => form(&args[1]),
         Some("outline") if args.len() == 2 => outline(&args[1]),
@@ -114,6 +117,22 @@ fn reorder(input: &str, output: &str, spec: &str) -> CliResult {
     let file = std::fs::File::create(output)?;
     k_pdf::write_with_page_order(&doc, &order, file)?;
     println!("wrote {output} ({} pages)", order.len());
+    Ok(())
+}
+
+fn delete(input: &str, output: &str, spec: &str) -> CliResult {
+    let doc = Document::open(input)?;
+    let count = doc.page_count()?;
+    let gone = parse_page_list(spec, count)?;
+    let keep: Vec<usize> = (0..count).filter(|p| !gone.contains(p)).collect();
+    if keep.is_empty() {
+        return Err("can't delete every page: a PDF needs at least one".into());
+    }
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    k_pdf::write_with_page_order(&doc, &keep, std::fs::File::create(output)?)?;
+    println!("wrote {output}: deleted {} pages, {} left", gone.len(), keep.len());
     Ok(())
 }
 
