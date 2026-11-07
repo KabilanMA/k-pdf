@@ -10,10 +10,14 @@ USAGE:
     k-pdf-cli info   <file.pdf>
     k-pdf-cli text   <file.pdf> [--page N]
     k-pdf-cli object <file.pdf> <num> [gen] [--decode]
-    k-pdf-cli render <file.pdf> <page> <out.png> [--scale S]
+    k-pdf-cli render <file.pdf> <page> <out.png> [--scale S] [--dark]
     k-pdf-cli reorder <in.pdf> <out.pdf> <pages>
     k-pdf-cli merge   <out.pdf> <in1.pdf> <in2.pdf>...
     k-pdf-cli form    <file.pdf>
+    k-pdf-cli outline <file.pdf>
+    k-pdf-cli comments  <file.pdf>
+    k-pdf-cli highlight <in.pdf> <out.pdf> <words> [--comment <text>]
+    k-pdf-cli note      <in.pdf> <out.pdf> <page> <left> <top> <text>
     k-pdf-cli blocks  <file.pdf> <page>
     k-pdf-cli crop    <in.pdf> <out.pdf> <left> <top> <right> <bottom> [pages]
     k-pdf-cli edit    <in.pdf> <out.pdf> <page> <block> <new text>
@@ -26,11 +30,16 @@ COMMANDS:
     info     Show version, page count, metadata and page sizes
     text     Extract plain text (all pages, or one page with --page, 1-based)
     object   Print an object; with --decode, write a stream's decoded data to stdout
-    render   Render a page (1-based) to a PNG; scale is pixels per point (default 2)
+    render   Render a page (1-based) to a PNG; scale is pixels per point (default 2);
+             --dark renders it as dark mode for reading does
     reorder  Save a copy with pages in a new order, e.g. \"3,1,2\" or \"5-10,1-4\"
              (pages left out are dropped)
     merge    Combine PDFs into one, in the order given
     form     List the form fields with their kinds and values
+    outline  List the sections and subsections (bookmarks) with their pages
+    comments List the comments: highlights, notes and other markup, with their text
+    highlight Highlight every occurrence of some words, optionally with a comment
+    note     Add a comment at a spot on a page (1-based; points from its top-left corner)
     fill     Fill in form fields: text as name=text, check boxes as name=on/off,
              radio buttons and choices as name=<option>
     crop     Keep only the given area of pages (points from the top-left corner of the
@@ -57,6 +66,10 @@ fn main() -> ExitCode {
         Some("reorder") if args.len() == 4 => reorder(&args[1], &args[2], &args[3]),
         Some("merge") if args.len() >= 3 => merge(&args[1], &args[2..]),
         Some("form") if args.len() == 2 => form(&args[1]),
+        Some("outline") if args.len() == 2 => outline(&args[1]),
+        Some("comments") if args.len() == 2 => comments(&args[1]),
+        Some("highlight") if args.len() == 4 || args.len() == 6 => highlight(&args[1..]),
+        Some("note") if args.len() == 7 => note(&args[1..]),
         Some("blocks") if args.len() == 3 => blocks(&args[1], &args[2]),
         Some("crop") if args.len() >= 4 => crop(&args[1..]),
         Some("redact") if args.len() >= 4 => redact(&args[1..]),
@@ -268,6 +281,99 @@ fn edit(input: &str, output: &str, page: &str, block: &str, new_text: &str) -> C
     let pages: Vec<(usize, usize)> = (0..doc.page_count()?).map(|p| (0, p)).collect();
     k_pdf::write_document_with_changes(&[&doc], &pages, &changes, std::fs::File::create(output)?)?;
     println!("wrote {output}");
+    Ok(())
+}
+
+fn comments(path: &str) -> CliResult {
+    use k_pdf::edit::annotate::CommentKind;
+    let doc = Document::open(path)?;
+    let list = k_pdf::edit::annotate::comments(&doc)?;
+    if list.is_empty() {
+        println!("no comments");
+    }
+    for c in &list {
+        let kind = match &c.kind {
+            CommentKind::Highlight => "highlight".to_string(),
+            CommentKind::Note => "note".to_string(),
+            CommentKind::Other(k) => k.to_lowercase(),
+        };
+        let by = if c.author.is_empty() { String::new() } else { format!(" by {}", c.author) };
+        println!("page {} {kind}{by}: {}", c.page + 1, c.text.replace('\n', " / "));
+    }
+    Ok(())
+}
+
+/// The name comments are signed with: the user's login name.
+fn author() -> String {
+    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_default()
+}
+
+fn highlight(args: &[String]) -> CliResult {
+    let (input, output, words) = (&args[0], &args[1], &args[2]);
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    let comment = match args.get(3).map(String::as_str) {
+        Some("--comment") => args[4].as_str(),
+        Some(other) => return Err(format!("unexpected {other:?}").into()),
+        None => "",
+    };
+    let doc = Document::open(input)?;
+    let count = doc.page_count()?;
+    let mut changes = k_pdf::Changes::default();
+    let mut found = 0;
+    for p in 0..count {
+        for area in k_pdf::edit::find_text(&doc, p, words)? {
+            let color = k_pdf::edit::annotate::HIGHLIGHT_YELLOW;
+            k_pdf::edit::annotate::add_highlight(&doc, p, &[area], color, comment, &author(), &mut changes)?;
+            found += 1;
+        }
+    }
+    if found == 0 {
+        return Err(format!("{words:?} wasn't found").into());
+    }
+    let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+    k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
+    println!("wrote {output}: {found} highlights");
+    Ok(())
+}
+
+fn note(args: &[String]) -> CliResult {
+    let (input, output) = (&args[0], &args[1]);
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    let doc = Document::open(input)?;
+    let count = doc.page_count()?;
+    let page: usize = args[2].parse().map_err(|_| "invalid page number")?;
+    if page == 0 || page > count {
+        return Err(format!("there is no page {page}").into());
+    }
+    let (x, y): (f32, f32) = (args[3].parse()?, args[4].parse()?);
+    let mut changes = k_pdf::Changes::default();
+    let color = k_pdf::edit::annotate::HIGHLIGHT_YELLOW;
+    k_pdf::edit::annotate::add_note(&doc, page - 1, [x, y], color, &args[5], &author(), &mut changes)?;
+    let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+    k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
+    println!("wrote {output}");
+    Ok(())
+}
+
+fn outline(path: &str) -> CliResult {
+    let doc = Document::open(path)?;
+    let pages = doc.pages()?;
+    let items = k_pdf::outline(&doc, &pages);
+    if items.is_empty() {
+        println!("no outline");
+    }
+    for item in &items {
+        let target = match &item.target {
+            Some(k_pdf::LinkTarget::Page { page, .. }) => format!("page {}", page + 1),
+            Some(k_pdf::LinkTarget::Uri(uri)) => uri.clone(),
+            None => "-".into(),
+        };
+        println!("{}{}  ({target})", "  ".repeat(item.level), item.title);
+    }
     Ok(())
 }
 
@@ -489,16 +595,22 @@ fn render(_: &[String]) -> CliResult {
 fn render(args: &[String]) -> CliResult {
     let [path, page, out, rest @ ..] = args else { return Err("usage: render <file.pdf> <page> <out.png>".into()) };
     let page: usize = page.parse()?;
-    let scale: f64 = match rest {
-        [flag, s] if flag == "--scale" => s.parse()?,
-        [] => 2.0,
-        _ => return Err("unknown options".into()),
-    };
+    let (mut scale, mut dark) = (2.0, false);
+    let mut options = rest.iter();
+    while let Some(flag) = options.next() {
+        match flag.as_str() {
+            "--scale" => scale = options.next().ok_or("--scale needs a value")?.parse()?,
+            "--dark" => dark = true,
+            other => return Err(format!("unknown option {other}").into()),
+        }
+    }
     let doc = Document::open(path)?;
     let pages = doc.pages()?;
     let page = pages.get(page.wrapping_sub(1)).ok_or("page out of range")?;
     let start = std::time::Instant::now();
-    let img = k_pdf::Renderer::new(&doc).render_page(page, scale)?;
+    let mut renderer = k_pdf::Renderer::new(&doc);
+    renderer.set_dark_pages(dark);
+    let img = renderer.render_page(page, scale)?;
     eprintln!("rendered {}x{} in {:.0} ms", img.width, img.height, start.elapsed().as_secs_f64() * 1000.0);
     let size = tiny_skia::IntSize::from_wh(img.width, img.height).ok_or("bad size")?;
     let pixmap = tiny_skia::Pixmap::from_vec(img.pixels, size).ok_or("bad pixmap")?;

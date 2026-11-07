@@ -1,4 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>k-pdf</title>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#6E9BFF"/>
@@ -8,14 +9,52 @@
       <stop offset="0" stop-color="#FFFFFF"/>
       <stop offset="1" stop-color="#EEF2FF"/>
     </linearGradient>
+    <linearGradient id="letter" gradientUnits="userSpaceOnUse" x1="92" y1="62" x2="180" y2="154">
+      <stop offset="0" stop-color="#3D63F0"/>
+      <stop offset="1" stop-color="#1F3BB8"/>
+    </linearGradient>
+    <linearGradient id="tag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F0503F"/>
+      <stop offset="1" stop-color="#D23224"/>
+    </linearGradient>
+    <clipPath id="k-box">
+      <rect x="0" y="62" width="256" height="92"/>
+    </clipPath>
+    <!-- The page's outline: the K's upper arm runs up to its folded corner. -->
+    <clipPath id="page-shape">
+      <path d="M74 36 H156 L194 74 V210 a10 10 0 0 1 -10 10 H74 a10 10 0 0 1 -10 -10 V46 a10 10 0 0 1 10 -10 Z"/>
+    </clipPath>
   </defs>
+
+  <!-- Background -->
   <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#bg)"/>
-  <path d="M84 50 H150 L188 88 V198 a10 10 0 0 1 -10 10 H84 a10 10 0 0 1 -10 -10 V60 a10 10 0 0 1 10 -10 Z"
-        fill="#1E3A9E" opacity="0.25" transform="translate(4 6)"/>
-  <path d="M84 50 H150 L188 88 V198 a10 10 0 0 1 -10 10 H84 a10 10 0 0 1 -10 -10 V60 a10 10 0 0 1 10 -10 Z"
+
+  <!-- The file: shadow and page (its folded corner goes over the K) -->
+  <path d="M74 36 H156 L194 74 V210 a10 10 0 0 1 -10 10 H74 a10 10 0 0 1 -10 -10 V46 a10 10 0 0 1 10 -10 Z"
+        fill="#1E3A9E" opacity="0.28" transform="translate(4 6)"/>
+  <path d="M74 36 H156 L194 74 V210 a10 10 0 0 1 -10 10 H74 a10 10 0 0 1 -10 -10 V46 a10 10 0 0 1 10 -10 Z"
         fill="url(#page)"/>
-  <path d="M150 50 V78 a10 10 0 0 0 10 10 H188 Z" fill="#B9CCFF"/>
-  <rect x="96" y="112" width="70" height="10" rx="5" fill="#8FA9F2"/>
-  <rect x="96" y="136" width="70" height="10" rx="5" fill="#8FA9F2"/>
-  <rect x="96" y="160" width="46" height="10" rx="5" fill="#8FA9F2"/>
+
+  <!-- The letter K on the page; its upper arm goes into the fold -->
+  <g fill="none" stroke="url(#letter)" stroke-width="24">
+    <g clip-path="url(#k-box)">
+      <path d="M104 62 V154"/>
+      <path d="M128 100 L178 166"/>
+    </g>
+    <path d="M200 22 L110 118" clip-path="url(#page-shape)"/>
+  </g>
+  <!-- The folded corner, with a soft shadow on the arm under it -->
+  <g clip-path="url(#page-shape)">
+    <path d="M156 36 V64 a10 10 0 0 0 10 10 H194 Z" fill="#1E3A9E" opacity="0.25" transform="translate(-3 3)"/>
+  </g>
+  <path d="M156 36 V64 a10 10 0 0 0 10 10 H194 Z" fill="#B9CCFF"/>
+
+  <!-- "PDF" tag across the bottom of the page -->
+  <rect x="50" y="170" width="104" height="36" rx="8" fill="#9E1F15" opacity="0.35" transform="translate(2 3)"/>
+  <rect x="50" y="170" width="104" height="36" rx="8" fill="url(#tag)"/>
+  <g fill="none" stroke="#FFFFFF" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M70 198 V178 H78 a6 6 0 0 1 0 12 H70"/>
+    <path d="M95 178 V198 H100 a10 10 0 0 0 0 -20 Z"/>
+    <path d="M136 178 H124 V198 M124 188 H133"/>
+  </g>
 </svg>

@@ -1,6 +1,6 @@
-# Builds the Linux release of k-pdf and, for a version tag (v0.1.0, …),
-# publishes it as a GitHub release. Run it by hand (Actions → Release →
-# Run workflow) to just get the archive as a build artifact.
+# Builds k-pdf for Linux, Windows and macOS and, for a version tag (v0.1.0,
+# …), publishes all three as one GitHub release. Run it by hand (Actions →
+# Release → Run workflow) to just get the files as build artifacts.
 name: Release
 
 on:
@@ -18,30 +18,64 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
       - name: System libraries for the window (X11, Wayland, OpenGL)
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev \
             libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-
       - name: Test
         run: cargo test --release --workspace --locked
-
       - name: Package
         id: package
-        run: echo "archive=$(packaging/linux/package.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
-
+        run: echo "file=$(packaging/linux/package.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: k-pdf-linux
-          path: ${{ steps.package.outputs.archive }}
+          path: ${{ steps.package.outputs.file }}
 
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Package
+        id: package
+        run: echo "file=$(packaging/windows/package.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k-pdf-windows
+          path: ${{ steps.package.outputs.file }}
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Package
+        id: package
+        run: echo "file=$(packaging/macos/bundle.sh | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: k-pdf-macos
+          path: ${{ steps.package.outputs.file }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ steps.package.outputs.archive }}
+          files: artifacts/*
           generate_release_notes: true

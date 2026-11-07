@@ -4,6 +4,8 @@
 #   ./install.sh                 install into ~/.local
 #   sudo PREFIX=/usr/local ./install.sh
 #   ./install.sh --default       also make k-pdf the default PDF application
+#   ./install.sh --link          link to the programs instead of copying them
+#                                (from the source tree: rebuilds show up at once)
 #   ./install.sh --uninstall     remove what was installed
 #
 # Run it from an unpacked release (the programs are next to it) or from the
@@ -28,7 +30,7 @@ case "${1:-}" in
     echo "k-pdf removed from $PREFIX"
     exit 0
     ;;
-""|--default) ;;
+""|--default|--link) ;;
 *)
     sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
@@ -39,15 +41,22 @@ esac
 if [ -x "$HERE/k-pdf" ]; then
     FROM="$HERE"
 elif [ -x "$HERE/../../target/release/k-pdf" ]; then
-    FROM="$HERE/../../target/release"
+    FROM="$(cd "$HERE/../../target/release" && pwd)"
 else
     echo "k-pdf isn't built yet: run 'cargo build --release --workspace' first" >&2
     exit 1
 fi
 
 mkdir -p "$BIN" "$APPS" "$ICONS/scalable/apps"
-install -m 755 "$FROM/k-pdf" "$BIN/k-pdf"
-[ -x "$FROM/k-pdf-cli" ] && install -m 755 "$FROM/k-pdf-cli" "$BIN/k-pdf-cli"
+for prog in k-pdf k-pdf-cli; do
+    [ -x "$FROM/$prog" ] || continue
+    if [ "${1:-}" = "--link" ]; then
+        ln -sfn "$FROM/$prog" "$BIN/$prog"
+    else
+        rm -f "$BIN/$prog" # may be a link from --link
+        install -m 755 "$FROM/$prog" "$BIN/$prog"
+    fi
+done
 install -m 644 "$HERE/k-pdf.svg" "$ICONS/scalable/apps/k-pdf.svg"
 # Launchers don't always search ~/.local/bin: point at the program itself.
 sed "s|^Exec=k-pdf |Exec=$BIN/k-pdf |" "$HERE/k-pdf.desktop" > "$APPS/k-pdf.desktop"

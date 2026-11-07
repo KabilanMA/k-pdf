@@ -23,6 +23,11 @@ pub enum Icon {
     Minus,
     More,
     Document,
+    Moon,
+    Pages,
+    Sections,
+    Comment,
+    Highlight,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -101,6 +106,45 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             for x in [3.5, 8.0, 12.5] {
                 painter.circle_filled(p(x, 8.0), 1.3 * s, color);
             }
+        }
+        Icon::Moon => {
+            // A crescent: the outer circle's arc between the points where it
+            // meets a smaller circle, then back along that one.
+            let mut pts = arc(8.0, 8.0, 6.0, 10.3, 259.7);
+            pts.extend(arc(11.0, 5.0, 5.0, 215.5, 54.5));
+            closed(&pts);
+        }
+        Icon::Pages => {
+            // Two page thumbnails, one above the other.
+            for y in [1.5, 9.0] {
+                painter.rect_stroke(
+                    Rect::from_min_max(p(4.0, y), p(12.0, y + 5.5)),
+                    CornerRadius::same(s as u8),
+                    stroke,
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
+        Icon::Sections => {
+            // A table of contents: headings with indented subheadings.
+            for (x, y) in [(2.0, 3.0), (5.0, 6.5), (5.0, 10.0), (2.0, 13.5)] {
+                painter.circle_filled(p(x, y), 0.9 * s, color);
+                line(&[(x + 2.5, y), (14.0, y)]);
+            }
+        }
+        Icon::Comment => {
+            // A speech bubble.
+            let mut pts = vec![(2.0, 3.5), (14.0, 3.5), (14.0, 11.0), (7.5, 11.0), (4.5, 14.0), (4.5, 11.0), (2.0, 11.0)];
+            pts.dedup();
+            closed(&pts);
+            line(&[(5.0, 6.5), (11.0, 6.5)]);
+            line(&[(5.0, 8.5), (9.0, 8.5)]);
+        }
+        Icon::Highlight => {
+            // A marker over a line of text.
+            closed(&[(6.0, 10.5), (12.0, 2.5), (14.5, 4.5), (8.5, 12.5)]);
+            line(&[(6.0, 10.5), (4.5, 12.5), (6.5, 13.5), (8.5, 12.5)]);
+            line(&[(1.5, 15.0), (14.5, 15.0)]);
         }
         Icon::Document => {
             closed(&[(3.0, 1.0), (10.0, 1.0), (13.5, 4.5), (13.5, 15.0), (3.0, 15.0)]);

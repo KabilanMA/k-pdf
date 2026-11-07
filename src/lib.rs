@@ -41,10 +41,10 @@ pub use encoding::decode_text_string;
 pub use error::{Error, Result};
 pub use filters::Decoded;
 pub use layout::reading_order;
-pub use links::{page_links, Link, LinkTarget};
+pub use links::{outline, page_links, Link, LinkTarget, OutlineItem};
 pub use object::{Dictionary, ObjRef, Object, Stream};
 pub use text::{chars_to_string, TextChar, TextExtractor};
 pub use forms::{fill_form, form_fields, ChoiceOption, FieldKind, FieldValue, FormField, Widget};
 pub use writer::{write_document, write_document_with_changes, write_document_with_options, write_with_page_order, Changes, WriteOptions};
 #[cfg(feature = "render")]
-pub use render::{RenderedPage, Renderer};
+pub use render::{dark::dark_page_color, RenderedPage, Renderer};

@@ -131,6 +131,30 @@ impl Editor {
         Ok((before, total))
     }
 
+    /// The open file, with the changes so far.
+    pub fn document(&self) -> Option<&k_pdf::Document> {
+        self.doc.as_ref()
+    }
+
+    /// Makes a change to the comments (see `k_pdf::edit::annotate`) with
+    /// `f`. Returns the changes from before, for undo, and what `f`
+    /// returned; on failure nothing is changed.
+    pub fn annotate<T>(
+        &mut self,
+        f: impl FnOnce(&k_pdf::Document, &mut Changes) -> k_pdf::Result<T>,
+    ) -> Result<(Changes, T), String> {
+        let doc = self.doc.as_ref().ok_or("the document isn't open")?;
+        let before = self.changes.clone();
+        match f(doc, &mut self.changes) {
+            Ok(v) => Ok((before, v)),
+            Err(e) => {
+                self.changes = before;
+                doc.set_overlay(&self.changes);
+                Err(e.to_string())
+            }
+        }
+    }
+
     /// Every place `words` appear in the open file: (page, area in display
     /// points).
     pub fn find_text(&self, words: &str) -> Vec<(usize, [f32; 4])> {
@@ -470,7 +494,7 @@ fn ascent(s: &Session) -> f32 {
 fn draw_cover(ui: &egui::Ui, s: &Session, to_screen: &dyn Fn(f32, f32) -> Pos2, zoom: f32) {
     if let Some([l, t, r, b]) = s.cover {
         let rect = Rect::from_min_max(to_screen(l, t), to_screen(r, b)).expand(1.0 * zoom);
-        ui.painter().rect_filled(rect, 0.0, Color32::WHITE);
+        ui.painter().rect_filled(rect, 0.0, crate::theme::paper(crate::theme::dark_pages()));
     }
 }
 
@@ -489,9 +513,10 @@ fn restyle(old: &str, old_styles: &[TextStyle], new: &str, typing: &TextStyle) -
     out
 }
 
+/// A text color as shown on the page (dark pages included).
 fn color32(c: [f32; 3]) -> Color32 {
     let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-    Color32::from_rgb(r, g, b)
+    crate::theme::on_page(Color32::from_rgb(r, g, b))
 }
 
 /// The formatting toolbar.

@@ -973,3 +973,55 @@ fn brotli_compression_is_marked_and_readable() {
     assert_eq!(entry.get(b"ExtensionLevel"), Some(&Object::Integer(1)));
     assert_eq!(entry.get(b"BaseVersion"), Some(&Object::Name(b"2.0".to_vec())));
 }
+
+#[test]
+fn comments_are_added_changed_saved_and_deleted() {
+    use k_pdf::edit::annotate::{self, CommentKind};
+    let content: &[u8] = b"BT /F1 12 Tf 72 720 Td (Read this sentence) Tj ET";
+    let mut b = Builder::new("1.4");
+    b.obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        .obj(2, "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>")
+        .obj(3, "<< /Type /Page /Parent 2 0 R /Contents 4 0 R /Annots 6 0 R /Resources << /Font << /F1 5 0 R >> >> >>")
+        .stream(4, "", content)
+        .obj(5, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+        .obj(6, "[]");
+    let doc = Document::from_bytes(b.finish("/Root 1 0 R")).unwrap();
+    let mut changes = k_pdf::Changes::default();
+
+    let area = k_pdf::edit::find_text(&doc, 0, "this").unwrap()[0];
+    let yellow = annotate::HIGHLIGHT_YELLOW;
+    let hl = annotate::add_highlight(&doc, 0, &[area], yellow, "", "me", &mut changes).unwrap();
+    let note = annotate::add_note(&doc, 0, [300.0, 100.0], yellow, "A note", "me", &mut changes).unwrap();
+    // A comment typed on the new highlight (an object added this session).
+    annotate::set_comment_text(&doc, hl, "Why “this”?", &mut changes).unwrap();
+
+    let list = annotate::page_comments(&doc, 0).unwrap();
+    assert_eq!(list.len(), 2, "{list:?}");
+    assert_eq!((&list[0].kind, list[0].text.as_str()), (&CommentKind::Highlight, "Why “this”?"));
+    assert_eq!((&list[1].kind, list[1].text.as_str()), (&CommentKind::Note, "A note"));
+    // The highlight covers the word, in display points.
+    let a = list[0].areas[0];
+    assert!((a[0] - area[0]).abs() < 0.01 && (a[3] - area[3]).abs() < 0.01, "{a:?} vs {area:?}");
+
+    // Saved and read back.
+    let mut out = Vec::new();
+    k_pdf::write_document_with_changes(&[&doc], &[(0, 0)], &changes, &mut out).unwrap();
+    let saved = Document::from_bytes(out).unwrap();
+    let list = annotate::comments(&saved).unwrap();
+    assert_eq!(list.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Why “this”?", "A note"]);
+    assert_eq!(list[0].author, "me");
+    // Each object written once.
+    let data = saved.data();
+    let header = format!("\n{} 0 obj", list[0].id.num);
+    assert!(data.windows(header.len()).filter(|w| *w == header.as_bytes()).count() <= 1);
+    // The text is still there, and the highlight is drawn.
+    assert!(text_of(&saved).contains("Read this sentence"));
+
+    // Deleting the note.
+    let mut changes = k_pdf::Changes::default();
+    annotate::delete_comment(&saved, 0, list[1].id, &mut changes).unwrap();
+    let left = annotate::comments(&saved).unwrap();
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].id, list[0].id);
+    let _ = note;
+}

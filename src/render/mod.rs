@@ -9,6 +9,7 @@
 //! blend modes. Not yet: soft-mask groups, JPEG 2000/JBIG2/CCITT images.
 
 mod color;
+pub mod dark;
 mod function;
 mod glyphs;
 pub(crate) mod image;
@@ -54,6 +55,10 @@ pub struct Renderer<'d> {
     system_fonts: SystemFonts,
     hidden_layers: HashSet<ObjRef>,
     hide_form_fields: bool,
+    /// Dark pages for reading (see [`dark`]), and the photos (device pixel
+    /// rectangles) to leave as they are on the page being rendered.
+    dark_pages: bool,
+    photos: Vec<dark::Keep>,
 }
 
 impl<'d> Renderer<'d> {
@@ -64,6 +69,8 @@ impl<'d> Renderer<'d> {
             system_fonts: SystemFonts::default(),
             hidden_layers: hidden_layers(doc),
             hide_form_fields: false,
+            dark_pages: false,
+            photos: Vec::new(),
         }
     }
 
@@ -72,6 +79,12 @@ impl<'d> Renderer<'d> {
     /// border, for viewers that draw editable fields on top of the page.
     pub fn set_hide_form_fields(&mut self, hide: bool) {
         self.hide_form_fields = hide;
+    }
+
+    /// Renders pages dark for reading: lightness turned around, hues kept,
+    /// photos left as they are (see [`dark`]).
+    pub fn set_dark_pages(&mut self, dark: bool) {
+        self.dark_pages = dark;
     }
 
     /// Renders `page` at `scale` pixels per point (1.0 = 72 dpi).
@@ -94,7 +107,12 @@ impl<'d> Renderer<'d> {
         self.draw_annotations(&mut canvas, page, &resources, base);
 
         // The page is opaque, so premultiplied and straight RGBA coincide.
-        Ok(RenderedPage { width: pw, height: ph, pixels: canvas.take() })
+        let mut pixels = canvas.take();
+        if self.dark_pages {
+            dark::darken(&mut pixels, pw, &self.photos);
+        }
+        self.photos.clear();
+        Ok(RenderedPage { width: pw, height: ph, pixels })
     }
 
     // ------------------------------------------------------------------
@@ -709,6 +727,9 @@ impl<'d> Renderer<'d> {
         let ts = to_ts(&ctm);
         match image::decode(doc, stream, resources, paint, target) {
             Some(img) => {
+                if self.dark_pages && !is_mask && dark::looks_like_photo(img.data(), img.width(), img.height()) {
+                    self.keep_photo(canvas, &ctm);
+                }
                 let (w, h) = (img.width() as f64, img.height() as f64);
                 let t = mul(&[1.0 / w, 0.0, 0.0, -1.0 / h, 0.0, 1.0], &ctm);
                 let paint = PixmapPaint {
@@ -725,6 +746,20 @@ impl<'d> Renderer<'d> {
                     canvas.fill_rect(r, &paint, ts, gs.mask.as_deref());
                 }
             }
+        }
+    }
+
+    /// Leaves the area a photo is drawn in (the unit square under `ctm`,
+    /// within the clip) as it is on a dark page.
+    fn keep_photo(&mut self, canvas: &Pixmap, ctm: &Matrix) {
+        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .map(|(x, y)| (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]));
+        let (x0, x1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
+        let (y0, y1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
+        let clamp = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
+        let keep = [clamp(x0, canvas.width()), clamp(y0, canvas.height()), clamp(x1, canvas.width()), clamp(y1, canvas.height())];
+        if keep[2] > keep[0] && keep[3] > keep[1] {
+            self.photos.push(keep);
         }
     }
 

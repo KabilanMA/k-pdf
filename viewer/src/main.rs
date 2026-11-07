@@ -6,13 +6,19 @@
 //! `--screenshot` saves the window once the visible pages have rendered and
 //! then exits; it exists for automated checks of the UI.
 
+// A window application: no console window on Windows (release builds).
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod compress;
 mod crop;
 mod editor;
+mod comments;
 mod form;
 mod icons;
 mod links;
 mod redact;
+#[cfg(feature = "script")]
+mod script;
 mod selection;
 mod sidebar;
 mod theme;
@@ -51,6 +57,8 @@ struct Args {
     path: Option<PathBuf>,
     page: Option<usize>,
     screenshot: Option<PathBuf>,
+    #[cfg(feature = "script")]
+    script: Option<PathBuf>,
 }
 
 fn parse_args() -> Args {
@@ -60,6 +68,8 @@ fn parse_args() -> Args {
         match a.to_str() {
             Some("--page") => args.page = it.next().and_then(|v| v.to_str()?.parse::<usize>().ok()),
             Some("--screenshot") => args.screenshot = it.next().map(PathBuf::from),
+            #[cfg(feature = "script")]
+            Some("--script") => args.script = it.next().map(PathBuf::from),
             Some("--version" | "-V") => {
                 println!("k-pdf {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -88,7 +98,7 @@ fn main() -> eframe::Result {
             })
             .with_inner_size([1000.0, 800.0])
             .with_min_inner_size([420.0, 300.0])
-            .with_decorations(false) // we draw our own title bar
+            .with_decorations(titlebar::NATIVE) // we draw our own title bar (not on macOS)
             .with_drag_and_drop(true),
         ..Default::default()
     };
@@ -151,6 +161,15 @@ enum Undo {
     Order(Vec<usize>),
     /// The text edits and crops before an edit or crop.
     Text(k_pdf::Changes),
+}
+
+/// Where comment controls attach on screen this frame.
+#[derive(Default)]
+struct CommentAnchors {
+    /// The comment whose box is open.
+    open: Option<Rect>,
+    /// The first line of the selection (for the highlight bar).
+    selection: Option<Rect>,
 }
 
 /// What to do once unsaved changes have been saved or discarded.
@@ -244,6 +263,8 @@ struct Screenshot {
     requested: bool,
     /// Frames to wait after everything is rendered, so the UI has settled.
     settle: u32,
+    /// Close the window once it is taken (`--screenshot`).
+    exit: bool,
 }
 
 struct Viewer {
@@ -309,8 +330,12 @@ struct Viewer {
     /// Redact mode: marking areas to remove for good.
     redact_mode: bool,
     redact: redact::Redact,
+    /// Highlights and notes: the comment box, the Comment tool.
+    comments: comments::Comments,
     /// Light, dark, or as the system is set.
     theme: egui::ThemePreference,
+    /// Pages shown dark for reading (lightness turned around, hues kept).
+    dark_pages: bool,
     /// The window title last set.
     window_title: String,
     /// The Compress dialog, and a compression running in the background:
@@ -336,6 +361,8 @@ struct Viewer {
     /// Page to jump to once the document is open (from `--page`).
     start_page: Option<usize>,
     screenshot: Option<Screenshot>,
+    #[cfg(feature = "script")]
+    script: Option<script::Script>,
 }
 
 impl Viewer {
@@ -391,9 +418,11 @@ impl Viewer {
             crop: crop::Crop::default(),
             redact_mode: false,
             redact: redact::Redact::default(),
+            comments: comments::Comments::default(),
             compress: compress::Compress::default(),
             compressing: None,
             theme: egui::ThemePreference::System,
+            dark_pages: false,
             window_title: "k-pdf".into(),
             view_rect: Rect::NOTHING,
             toolbar_widths: [None; 2],
@@ -404,7 +433,9 @@ impl Viewer {
             saving: None,
             allow_close: false,
             start_page: args.page.map(|p| p.saturating_sub(1)),
-            screenshot: args.screenshot.map(|path| Screenshot { path, requested: false, settle: 3 }),
+            screenshot: args.screenshot.map(|path| Screenshot { path, requested: false, settle: 3, exit: true }),
+            #[cfg(feature = "script")]
+            script: args.script.map(|p| script::Script::load(&p).unwrap_or_else(|e| panic!("script: {e}"))),
         };
         if let Some(p) = args.path {
             viewer.load(p);
@@ -424,7 +455,14 @@ impl Viewer {
     fn load(&mut self, path: PathBuf) {
         // Keep an absolute path: relative ones (from the command line) mean
         // nothing to the file dialogs, which run in another process.
+        // (On Windows, canonical paths have a \\?\ prefix that file dialogs
+        // and users don't expect.)
+        #[cfg(windows)]
+        let path = std::path::absolute(&path).unwrap_or(path);
+        #[cfg(not(windows))]
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path)).unwrap_or(path);
+        self.comments.open = None;
+        self.comments.placing = false;
         self.editor.open(&path);
         self.redact = redact::Redact::default();
         self.loading = Some(path.clone());
@@ -510,6 +548,7 @@ impl Viewer {
     }
 
     fn undo(&mut self) {
+        self.close_comment();
         if let Some(step) = self.undo.pop() {
             let current = self.apply_step(step);
             self.redo.push(current);
@@ -517,6 +556,7 @@ impl Viewer {
     }
 
     fn redo(&mut self) {
+        self.close_comment();
         if let Some(step) = self.redo.pop() {
             let current = self.apply_step(step);
             self.undo.push(current);
@@ -570,6 +610,7 @@ impl Viewer {
     /// After crops (or undoing them): page sizes, form field positions and
     /// every page's rendering change.
     fn content_changed(&mut self) {
+        self.comments.invalidate();
         self.pool.set_overlay(Arc::new(self.editor.changes().clone()));
         let mut resized = Vec::new();
         if let (Some(sizes), Some(doc)) = (self.editor.page_sizes(), self.doc.as_mut()) {
@@ -585,12 +626,14 @@ impl Viewer {
         }
         self.form.update_layout(&self.editor.form_fields());
         self.refresh_pages(None);
+        // Stay on the same page as sizes change.
+        if !resized.is_empty() {
+            self.go_to_page(self.current_page);
+        }
         // The old bitmaps of resized pages would show stretched: drop them.
         for key in resized {
             self.textures.remove(&key);
         }
-        // Stay on the same page as sizes change.
-        self.go_to_page(self.current_page);
     }
 
     fn handle_crop_action(&mut self, action: crop::Action) {
@@ -631,6 +674,8 @@ impl Viewer {
 
     fn set_crop_mode(&mut self, on: bool) {
         if on {
+            self.close_comment();
+            self.comments.placing = false;
             self.set_edit_mode(false);
             self.redact_mode = false;
         }
@@ -639,10 +684,31 @@ impl Viewer {
         self.selection = None;
     }
 
+    /// Shows pages dark for reading, or normally again: every page and
+    /// thumbnail is rendered again (the old ones stay until then).
+    fn set_dark_pages(&mut self, dark: bool) {
+        if dark == self.dark_pages {
+            return;
+        }
+        self.dark_pages = dark;
+        theme::set_dark_pages(dark);
+        self.pool.set_dark_pages(dark);
+        for key in 0..self.sources.len() {
+            if let Some(t) = self.textures.get_mut(&key) {
+                t.scale = -1.0;
+            }
+            self.failed.remove(&key);
+            self.sidebar.invalidate(key);
+        }
+        self.last_want = (Vec::new(), 0.0);
+    }
+
     /// Redact mode keeps its marks while off, until they are applied or
     /// another file is opened.
     fn set_redact_mode(&mut self, on: bool) {
         if on {
+            self.close_comment();
+            self.comments.placing = false;
             self.set_edit_mode(false);
             self.crop_mode = false;
             self.crop.clear();
@@ -715,6 +781,8 @@ impl Viewer {
             self.handle_editor_event(event);
         }
         if on {
+            self.close_comment();
+            self.comments.placing = false;
             self.crop_mode = false;
             self.crop.clear();
             self.redact_mode = false;
@@ -723,9 +791,226 @@ impl Viewer {
         self.selection = None;
     }
 
+    // ------------------------------------------------------------------
+    // Comments
+    // ------------------------------------------------------------------
+
+    /// The Comment tool: the next click on a page places a note there.
+    fn set_placing_note(&mut self, on: bool) {
+        if on {
+            self.close_comment();
+            self.set_edit_mode(false);
+            self.set_crop_mode(false);
+            self.redact_mode = false;
+        }
+        self.comments.placing = on;
+    }
+
+    /// After adding, changing or deleting a comment on `page` (of the open
+    /// file): that page is drawn again and the lists read again.
+    fn annotations_changed(&mut self, page: usize) {
+        self.comments.invalidate();
+        self.pool.set_overlay(Arc::new(self.editor.changes().clone()));
+        self.refresh_pages(Some(page));
+    }
+
+    /// Highlights the selected text in `color`; with `comment`, also opens
+    /// the comment box for it.
+    fn highlight_selection(&mut self, color: [u8; 3], comment: bool) {
+        let Some(sel) = self.selection.filter(|s| !s.is_empty()) else { return };
+        let Some(&(0, page)) = self.sources.get(sel.page) else {
+            self.error = Some("Pages inserted from other files can't be highlighted yet.".into());
+            return;
+        };
+        let Some(chars) = self.chars.get(&sel.page) else { return };
+        let areas: Vec<[f32; 4]> = selection::highlight_rects(chars, sel.range())
+            .iter()
+            .map(|r| [r.left(), r.top(), r.right(), r.bottom()])
+            .collect();
+        // Commenting on text that is already highlighted: that highlight's
+        // comment, rather than a second highlight.
+        if comment {
+            let existing = self.comments.on_page(&self.editor, page).iter().rev().find(|c| {
+                c.kind == k_pdf::edit::annotate::CommentKind::Highlight
+                    && areas.iter().all(|&[l, t, r, b]| {
+                        let (x, y) = ((l + r) / 2.0, (t + b) / 2.0);
+                        c.areas.iter().any(|a| x >= a[0] - 1.0 && x <= a[2] + 1.0 && y >= a[1] - 1.0 && y <= a[3] + 1.0)
+                    })
+            }).cloned();
+            if let Some(c) = existing {
+                self.selection = None;
+                self.close_comment();
+                let before = self.editor.changes().clone();
+                self.comments.start(&c, before, false, true);
+                return;
+            }
+        }
+        let author = comments::author();
+        let added = self.editor.annotate(|doc, changes| {
+            k_pdf::edit::annotate::add_highlight(doc, page, &areas, color, "", &author, changes)
+        });
+        match added {
+            Ok((before, id)) => {
+                self.comments.color = color;
+                self.annotations_changed(page);
+                self.selection = None;
+                match self.comments.find(&self.editor, page, id).filter(|_| comment) {
+                    Some(c) => self.comments.start(&c, before, true, true),
+                    None => self.record(Undo::Text(before)),
+                }
+            }
+            Err(e) => self.error = Some(format!("Could not highlight: {e}")),
+        }
+    }
+
+    /// Places a note at `at` (display points) on `page` of the open file
+    /// and opens its comment box.
+    fn place_note(&mut self, page: usize, at: Pos2) {
+        self.comments.placing = false;
+        let author = comments::author();
+        let color = k_pdf::edit::annotate::HIGHLIGHT_YELLOW;
+        let added = self.editor.annotate(|doc, changes| {
+            k_pdf::edit::annotate::add_note(doc, page, [at.x - 3.0, at.y - 3.0], color, "", &author, changes)
+        });
+        match added {
+            Ok((before, id)) => {
+                self.annotations_changed(page);
+                if let Some(c) = self.comments.find(&self.editor, page, id) {
+                    self.comments.start(&c, before, true, true);
+                } else {
+                    self.record(Undo::Text(before));
+                }
+            }
+            Err(e) => self.error = Some(format!("Could not add the note: {e}")),
+        }
+    }
+
+    /// Opens the comment box of `c` (closing any other).
+    fn open_comment(&mut self, c: &k_pdf::edit::annotate::Comment, focus: bool) {
+        if self.comments.open.as_ref().is_some_and(|o| o.id == c.id) {
+            return;
+        }
+        self.close_comment();
+        let before = self.editor.changes().clone();
+        self.comments.start(c, before, false, focus);
+    }
+
+    /// Closes the comment box, keeping what was typed (one undo step for
+    /// the whole visit). A new note left empty is removed again.
+    fn close_comment(&mut self) {
+        let Some(mut open) = self.comments.open.take() else { return };
+        let trimmed = open.text.trim_end().to_string();
+        if trimmed != open.text {
+            open.text = trimmed;
+            self.set_comment_text(&open);
+        }
+        let note = self.comments.find(&self.editor, open.page, open.id).map(|c| c.kind);
+        if open.created && open.text.is_empty() && note == Some(k_pdf::edit::annotate::CommentKind::Note) {
+            self.editor.restore(open.before);
+            self.annotations_changed(open.page);
+            return;
+        }
+        if open.created || open.changed() {
+            self.record(Undo::Text(open.before));
+            self.pool.set_overlay(Arc::new(self.editor.changes().clone()));
+        }
+    }
+
+    /// Deletes the comment whose box is open.
+    fn delete_open_comment(&mut self) {
+        let Some(open) = self.comments.open.take() else { return };
+        if open.created {
+            // Just made: as if it never was.
+            self.editor.restore(open.before);
+        } else {
+            let (page, id) = (open.page, open.id);
+            match self.editor.annotate(|doc, changes| k_pdf::edit::annotate::delete_comment(doc, page, id, changes)) {
+                Ok(_) => self.record(Undo::Text(open.before)),
+                Err(e) => self.error = Some(format!("Could not delete the comment: {e}")),
+            }
+        }
+        self.annotations_changed(open.page);
+    }
+
+    /// Stores the text typed in the comment box (as it is typed).
+    fn set_comment_text(&mut self, open: &comments::Open) {
+        let (id, text) = (open.id, open.text.clone());
+        match self.editor.annotate(|doc, changes| k_pdf::edit::annotate::set_comment_text(doc, id, &text, changes)) {
+            Ok(_) => self.comments.update_text(id, &text),
+            Err(e) => self.error = Some(format!("Could not change the comment: {e}")),
+        }
+    }
+
+    /// The comments for the sidebar's list, in page order.
+    fn comment_rows(&mut self) -> Vec<sidebar::CommentRow> {
+        let all = self.comments.all(&self.editor);
+        let mut rows = Vec::with_capacity(all.len());
+        for c in all.iter() {
+            // Pages of the open file have the same key as their index.
+            let chars = self.chars.get(&c.page).cloned();
+            let excerpt = self.comments.excerpt(c, chars.as_deref().map(|v| v.as_slice()));
+            if excerpt.is_none() && c.kind == k_pdf::edit::annotate::CommentKind::Highlight {
+                self.request_chars(c.page);
+            }
+            let mut by = c.author.clone();
+            if let Some(d) = &c.modified {
+                if !by.is_empty() {
+                    by += " · ";
+                }
+                by += &comments::short_date(d);
+            }
+            rows.push(sidebar::CommentRow {
+                id: c.id,
+                page: c.page,
+                position: self.position_of(c.page),
+                color: comments::color32(c.color),
+                kind: comments::kind_name(&c.kind),
+                excerpt,
+                text: c.text.clone(),
+                by,
+            });
+        }
+        // Pages may have been moved.
+        rows.sort_by_key(|r| r.position);
+        rows
+    }
+
+    /// The comment box and the bar over selected text, on top of the pages.
+    fn comment_overlays(&mut self, ctx: &egui::Context, anchors: &CommentAnchors) {
+        let view = self.view_rect;
+        if let Some(open) = &self.comments.open {
+            let (page, id) = (open.page, open.id);
+            let Some(comment) = self.comments.find(&self.editor, page, id) else {
+                self.comments.open = None;
+                return;
+            };
+            let mut open = self.comments.open.take().expect("checked above");
+            let action = comments::popup(ctx, &mut open, &comment, anchors.open, view);
+            self.comments.open = Some(open);
+            match action {
+                comments::PopupAction::None => {}
+                comments::PopupAction::Edited => {
+                    let open = self.comments.open.take().expect("still open");
+                    self.set_comment_text(&open);
+                    self.comments.open = Some(open);
+                }
+                comments::PopupAction::Close => self.close_comment(),
+                comments::PopupAction::Delete => self.delete_open_comment(),
+            }
+        } else if let Some(anchor) = anchors.selection
+            && let Some(action) = comments::selection_bar(ctx, anchor, view, self.comments.color)
+        {
+            match action {
+                comments::BarAction::Highlight(color) => self.highlight_selection(color, false),
+                comments::BarAction::Comment => self.highlight_selection(self.comments.color, true),
+            }
+        }
+    }
+
     /// Saves the current page order to `target` in the background, then
     /// does `after`.
     fn save(&mut self, target: PathBuf, after: After) {
+        self.close_comment();
         let Some(doc) = &self.doc else { return };
         if self.saving.is_some() {
             return;
@@ -772,6 +1057,7 @@ impl Viewer {
     /// Asks where to save a compressed copy of the current state (with
     /// unsaved changes), then compresses in the background.
     fn start_compress(&mut self, options: k_pdf::compress::CompressOptions) {
+        self.close_comment();
         let Some(doc) = &self.doc else { return };
         if doc.encrypted {
             self.error = Some("Encrypted files can't be compressed yet.".into());
@@ -947,6 +1233,9 @@ impl Viewer {
                 Reply::Opened(mut info) => {
                     let page_count = info.page_sizes.len();
                     self.form = form::Form::new(std::mem::take(&mut info.fields));
+                    let outline = std::mem::take(&mut info.outline);
+                    // Reopened after saving: the sidebar stays as it was.
+                    let view = self.doc.as_ref().filter(|d| d.path == info.path).map(|_| self.sidebar.view());
                     self.doc = Some(*info);
                     self.loading = None;
                     self.textures.clear();
@@ -955,6 +1244,8 @@ impl Viewer {
                     self.chars_requested.clear();
                     self.links.clear();
                     self.sidebar.clear();
+                    self.sidebar.set_outline(outline, page_count, view);
+                    self.comments.reset();
                     self.back.clear();
                     self.order = (0..page_count).collect();
                     self.sources = (0..page_count).map(|p| (0, p)).collect();
@@ -977,7 +1268,9 @@ impl Viewer {
                     self.loading = None;
                     self.error = Some(format!("Could not open {}: {e}", path.display()));
                 }
-                Reply::Page { page, scale, image } => {
+                // Rendered before dark pages were switched on or off.
+                Reply::Page { dark, .. } | Reply::Thumb { dark, .. } if dark != self.dark_pages => {}
+                Reply::Page { page, scale, image, .. } => {
                     let bytes = image.width() * image.height() * 4;
                     let texture = ctx.load_texture(format!("page-{page}"), image, egui::TextureOptions::LINEAR);
                     self.textures.insert(page, PageTexture { texture, scale, bytes, last_used: self.frame });
@@ -986,7 +1279,7 @@ impl Viewer {
                     }
                     self.failed.remove(&page);
                 }
-                Reply::Thumb { page, image } => self.sidebar.insert(ctx, page, image),
+                Reply::Thumb { page, image, .. } => self.sidebar.insert(ctx, page, image),
                 Reply::Added { path, first, page_sizes } => {
                     self.added.push(path.clone());
                     let d = self.added.len();
@@ -1049,6 +1342,17 @@ impl Viewer {
             max_w = max_w.max(size.x * self.zoom);
         }
         (tops, Vec2::new(max_w + 2.0 * MARGIN, y - GAP + MARGIN))
+    }
+
+    /// The spot being read, for the sidebar's sections: a position, and
+    /// display points from the top of that page. It is a quarter of the way
+    /// down the view, so a heading near the top counts as being read.
+    fn reading_spot(&self) -> (usize, f32) {
+        let (tops, _) = self.layout();
+        let y = self.pending_offset.unwrap_or(self.last_offset).y + (self.viewport_size.y / 4.0).max(2.0 * MARGIN);
+        let pos = tops.partition_point(|&t| t <= y).saturating_sub(1);
+        let within = tops.get(pos).map_or(0.0, |&t| (y - t) / self.zoom);
+        (pos, within.max(0.0))
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -1133,6 +1437,19 @@ impl Viewer {
             return;
         }
 
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::D) {
+            self.set_dark_pages(!self.dark_pages);
+        }
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
+            self.highlight_selection(self.comments.color, false);
+        }
+        if self.comments.placing && pressed(Modifiers::NONE, Key::Escape) {
+            self.comments.placing = false;
+        }
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::B) {
+            self.show_sidebar = true;
+            self.sidebar.toggle_view(&self.pool);
+        }
         if pressed(Modifiers::COMMAND, Key::E) {
             self.set_edit_mode(!self.edit_mode);
         }
@@ -1394,6 +1711,12 @@ impl Viewer {
             {
                 self.set_redact_mode(!self.redact_mode);
             }
+            if icons::button(ui, Icon::Comment, labels.then_some("Comment"), self.comments.placing, true)
+                .on_hover_text("Add a comment anywhere: click here, then on the spot. To highlight or comment on text, select it.")
+                .clicked()
+            {
+                self.set_placing_note(!self.comments.placing);
+            }
         });
         divider(ui);
         if icons::button(ui, Icon::Sidebar, None, self.show_sidebar, true)
@@ -1401,6 +1724,12 @@ impl Viewer {
             .clicked()
         {
             self.show_sidebar = !self.show_sidebar;
+        }
+        if icons::button(ui, Icon::Moon, None, self.dark_pages, true)
+            .on_hover_text("Dark pages for reading: light text on a dark page, colors kept (Ctrl+Shift+D)")
+            .clicked()
+        {
+            self.set_dark_pages(!self.dark_pages);
         }
     }
 
@@ -1438,6 +1767,10 @@ impl Viewer {
             }
             ui.separator();
             ui.weak("Appearance");
+            let mut dark = self.dark_pages;
+            if ui.checkbox(&mut dark, "Dark pages for reading").on_hover_text("Ctrl+Shift+D").changed() {
+                self.set_dark_pages(dark);
+            }
             let before = self.theme;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.theme, egui::ThemePreference::System, "System");
@@ -1619,7 +1952,7 @@ impl Viewer {
             .with_title("Document info")
             .with_inner_size([480.0, 360.0])
             .with_min_inner_size([260.0, 160.0])
-            .with_decorations(false); // same custom title bar as the viewer
+            .with_decorations(titlebar::NATIVE); // same title bar as the viewer
         let mut open = true;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("document-info"), builder, |ui, _class| {
             let ctx = ui.ctx().clone();
@@ -1669,7 +2002,8 @@ impl Viewer {
     // Pages
     // ------------------------------------------------------------------
 
-    fn pages(&mut self, ui: &mut egui::Ui) {
+    fn pages(&mut self, ui: &mut egui::Ui) -> CommentAnchors {
+        let mut anchors = CommentAnchors::default();
         // Ctrl + mouse wheel zooms.
         let zoom_delta = ui.input(|i| i.zoom_delta());
         if zoom_delta != 1.0 && ui.ui_contains_pointer() {
@@ -1680,7 +2014,7 @@ impl Viewer {
         self.apply_fit();
 
         let (tops, content) = self.layout();
-        let Some(doc) = &self.doc else { return };
+        let Some(doc) = &self.doc else { return anchors };
         let sizes: Vec<Vec2> = self.order.iter().map(|&p| doc.page_sizes[p] * self.zoom).collect();
 
         // Mouse drags select text; egui only drag-scrolls on touch screens.
@@ -1721,7 +2055,7 @@ impl Viewer {
                 visible.push((page, rect));
                 visible_positions.push(i);
                 painter.add(egui::epaint::Shadow { offset: [0, 3], blur: 14, spread: 0, color: page_shadow }.as_shape(rect, 1));
-                painter.rect_filled(rect, 0.0, Color32::WHITE);
+                painter.rect_filled(rect, 0.0, theme::paper(self.dark_pages));
                 if let Some(t) = self.textures.get_mut(&page) {
                     t.last_used = self.frame;
                     let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
@@ -1740,7 +2074,24 @@ impl Viewer {
                     for r in selection::highlight_rects(chars, sel.range()) {
                         let r = Rect::from_min_max(rect.min + r.min.to_vec2() * zoom, rect.min + r.max.to_vec2() * zoom);
                         painter.rect_filled(r.expand(0.5), 1.0, SELECTION_COLOR);
+                        if !self.dragging && anchors.selection.is_none() {
+                            anchors.selection = Some(r);
+                        }
                     }
+                }
+                // The comment whose box is open: outlined.
+                if let Some(open) = &self.comments.open
+                    && self.sources.get(page) == Some(&(0, open.page))
+                    && let Some(c) = self.comments.find(&self.editor, open.page, open.id)
+                {
+                    let accent = theme::palette(ui).accent;
+                    let mut all = Rect::NOTHING;
+                    for &[l, t, r, b] in &c.areas {
+                        let r = Rect::from_min_max(rect.min + Vec2::new(l, t) * zoom, rect.min + Vec2::new(r, b) * zoom);
+                        painter.rect_stroke(r.expand(2.0), 3.0, egui::Stroke::new(2.0, accent), egui::StrokeKind::Outside);
+                        all = all.union(r);
+                    }
+                    anchors.open = Some(all);
                 }
             }
             // The current page is the one under the upper third of the view.
@@ -1769,9 +2120,44 @@ impl Viewer {
                         self.handle_editor_event(event);
                     }
                 }
+            } else if self.comments.placing {
+                // The Comment tool: click where the note goes.
+                let response = ui.interact(screen_viewport, ui.id().with("place-note"), Sense::click());
+                let at = response.hover_pos().and_then(|p| visible.iter().find(|(_, r)| r.contains(p)).map(|&(k, r)| (k, r, p)));
+                if let Some((key, rect, p)) = at
+                    && let Some(&(0, page)) = self.sources.get(key)
+                {
+                    ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+                    let response = response.on_hover_text_at_pointer("Click to place a comment here (Esc: cancel)");
+                    if response.clicked() {
+                        self.place_note(page, ((p - rect.min) / zoom).to_pos2());
+                    }
+                }
             } else {
                 let response = ui.interact(screen_viewport, ui.id().with("pages"), Sense::click_and_drag());
                 self.pointer_selection(ui, &response, &visible);
+                // Comments under the pointer: a click opens them.
+                let hit = response.hover_pos().and_then(|p| {
+                    let &(key, rect) = visible.iter().find(|(_, r)| r.contains(p))?;
+                    let &(0, page) = self.sources.get(key)? else { return None };
+                    self.comments.at(&self.editor, page, ((p - rect.min) / zoom).to_pos2())
+                });
+                if let Some(c) = hit
+                    && !self.dragging
+                {
+                    ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+                    if self.comments.open.as_ref().is_none_or(|o| o.id != c.id) {
+                        let tip = if c.text.trim().is_empty() {
+                            format!("{} — click to add a comment", comments::kind_name(&c.kind))
+                        } else {
+                            c.text.clone()
+                        };
+                        response.clone().on_hover_text_at_pointer(tip);
+                    }
+                    if response.clicked() && self.selection.is_none_or(|s| s.is_empty()) {
+                        self.open_comment(&c, false);
+                    }
+                }
             }
 
             // Form fields, on top of the page and the selection area.
@@ -1810,6 +2196,7 @@ impl Viewer {
             }
         }
         self.request_pages(ui.ctx(), &visible_positions, ppp);
+        anchors
     }
 
     /// Mouse text selection: press and drag to select, double-click for a
@@ -2002,6 +2389,28 @@ impl Viewer {
 }
 
 impl eframe::App for Viewer {
+    /// `--script`: the next scripted input.
+    #[cfg(feature = "script")]
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if self.screenshot.is_some() || self.loading.is_some() || (self.doc.is_none() && self.error.is_none()) {
+            ctx.request_repaint();
+            return; // waiting for a screenshot, or for the document
+        }
+        let Some(script) = &mut self.script else { return };
+        match script.feed(raw) {
+            script::Next::Continue => {}
+            script::Next::Shot(path) => {
+                self.screenshot = Some(Screenshot { path, requested: false, settle: 3, exit: false });
+            }
+            script::Next::Done => {
+                self.script = None;
+                self.allow_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+        ctx.request_repaint();
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
@@ -2035,30 +2444,60 @@ impl eframe::App for Viewer {
             && let Some(doc) = &self.doc
         {
             let sizes = doc.page_sizes.clone();
+            let reading = self.reading_spot();
+            let rows = if self.sidebar.view() == sidebar::View::Comments { self.comment_rows() } else { Vec::new() };
+            let open_comment = self.comments.open.as_ref().map(|o| o.id);
             let mut action = None;
-            egui::Panel::left("sidebar")
+            // Each view keeps its own width: sections need room for titles.
+            let (id, width) = match self.sidebar.view() {
+                sidebar::View::Pages => ("sidebar", sidebar::DEFAULT_WIDTH),
+                sidebar::View::Sections => ("sidebar-sections", sidebar::SECTIONS_WIDTH),
+                sidebar::View::Comments => ("sidebar-comments", sidebar::SECTIONS_WIDTH),
+            };
+            egui::Panel::left(id)
                 .resizable(true)
-                .default_size(sidebar::DEFAULT_WIDTH)
+                .default_size(width)
                 .size_range(100.0..=400.0)
                 .show(ui, |ui| {
-                    action = self.sidebar.show(ui, &sizes, &self.order, self.current_page, &self.pool);
+                    action = self.sidebar.show(
+                        ui,
+                        &sizes,
+                        &self.order,
+                        reading,
+                        sidebar::CommentList { rows: &rows, open: open_comment },
+                        &self.pool,
+                    );
                 });
             match action {
                 Some(sidebar::Action::GoTo(pos)) => self.go_to_page(pos),
+                Some(sidebar::Action::Section(LinkTarget::Page { page, top })) => {
+                    self.go_to(self.position_of(page), top)
+                }
+                Some(sidebar::Action::Section(target)) => self.follow_link(ui.ctx(), &target),
+                Some(sidebar::Action::Comment { id, page }) => {
+                    if let Some(c) = self.comments.find(&self.editor, page, id) {
+                        self.go_to(self.position_of(page), Some(c.rect[1]));
+                        self.open_comment(&c, false);
+                    }
+                }
                 Some(sidebar::Action::Move { from, to }) => self.move_page(from, to),
                 Some(sidebar::Action::Insert(pos)) => self.insert_file_dialog(pos),
                 None => {}
             }
         }
+        let mut anchors = CommentAnchors::default();
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::NONE.fill(palette.canvas))
             .show(ui, |ui| {
                 if self.doc.is_some() {
-                    self.pages(ui);
+                    anchors = self.pages(ui);
                 } else {
                     self.welcome(ui);
                 }
             });
+        if self.doc.is_some() && !self.crop_mode && !self.redact_mode && !self.edit_mode {
+            self.comment_overlays(&ctx, &anchors);
+        }
         if self.crop_mode
             && self.doc.is_some()
             && let Some(action) = self.crop.panel(&ctx, self.view_rect, self.order.len())
@@ -2106,7 +2545,12 @@ impl Viewer {
             if let Err(e) = std::fs::write(&shot.path, ppm) {
                 eprintln!("screenshot failed: {e}");
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if shot.exit {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.screenshot = None;
+                ctx.request_repaint();
+            }
             return;
         }
         let done_loading = self.loading.is_none() && (self.doc.is_some() || self.error.is_some());

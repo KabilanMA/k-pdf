@@ -37,7 +37,7 @@ const MAX_DEPTH: usize = 32;
 pub fn page_links(doc: &Document, pages: &[Page], index: usize) -> Vec<Link> {
     let Some(page) = pages.get(index) else { return Vec::new() };
     let Ok(Object::Array(annots)) = doc.get_resolved(&page.dict, b"Annots") else { return Vec::new() };
-    let mut resolver = Resolver { doc, pages, page_index: None, index };
+    let mut resolver = Resolver { doc, pages, page_index: None, dests: None, nodes: HashMap::new(), index };
     let m = page.display_matrix(doc);
     let mut out = Vec::new();
     for annot in &annots {
@@ -61,6 +61,62 @@ pub fn page_links(doc: &Document, pages: &[Page], index: usize) -> Vec<Link> {
     out
 }
 
+/// An entry of the document's outline (its bookmarks: the section and
+/// subsection headings a table of contents would show).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineItem {
+    pub title: String,
+    /// 0 for top-level sections, 1 for their subsections, and so on.
+    pub level: usize,
+    /// Where it points (`None` if the destination can't be found).
+    pub target: Option<LinkTarget>,
+    /// Whether the file asks for its subsections to be shown at first.
+    pub open: bool,
+}
+
+/// Outline entries read at most (hostile files can loop or be huge).
+const MAX_OUTLINE_ITEMS: usize = 50_000;
+
+/// The document's outline, flattened in reading order with each entry's
+/// level; empty if it has none.
+pub fn outline(doc: &Document, pages: &[Page]) -> Vec<OutlineItem> {
+    let mut out = Vec::new();
+    let Some(root) = doc.catalog().ok().and_then(|c| doc.get_dict(&c, b"Outlines")) else { return out };
+    let mut resolver = Resolver { doc, pages, page_index: None, dests: None, nodes: HashMap::new(), index: 0 };
+    let mut seen = std::collections::HashSet::new();
+    // (next sibling to read, its level)
+    let mut stack: Vec<(Object, usize)> = root.get(b"First").map(|f| (f.clone(), 0)).into_iter().collect();
+    while let Some((node, level)) = stack.pop() {
+        if out.len() >= MAX_OUTLINE_ITEMS {
+            break;
+        }
+        if let Object::Reference(r) = node
+            && !seen.insert(r)
+        {
+            continue; // a loop
+        }
+        let Some(item) = doc.resolve(&node).ok().and_then(|o| o.as_dict().cloned()) else { continue };
+        let title = doc
+            .get_resolved(&item, b"Title")
+            .ok()
+            .and_then(|t| t.as_string().map(decode_text_string))
+            .unwrap_or_default();
+        let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+        let open = doc.get_resolved(&item, b"Count").ok().and_then(|c| c.as_i64()).unwrap_or(0) > 0;
+        out.push(OutlineItem { title, level, target: resolver.link_target(&item), open });
+        // Children first, then the next sibling.
+        if let Some(next) = item.get(b"Next") {
+            stack.push((next.clone(), level));
+        }
+        if level < MAX_DEPTH
+            && let Some(first) = item.get(b"First")
+        {
+            stack.push((first.clone(), level + 1));
+        }
+    }
+    out
+}
+
 fn apply(m: &[f64; 6], x: f64, y: f64) -> (f64, f64) {
     (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
 }
@@ -70,6 +126,14 @@ struct Resolver<'a> {
     pages: &'a [Page],
     /// Page object → index, built on first use.
     page_index: Option<HashMap<ObjRef, usize>>,
+    /// The catalog's `/Dests` dictionary and the root of the `/Names` →
+    /// `/Dests` name tree, looked up on first use (the outline resolves
+    /// thousands of names).
+    dests: Option<(Option<Dictionary>, Option<Dictionary>)>,
+    /// The name tree's inner nodes read so far: few, and visited by every
+    /// lookup (reading them again each time would decompress their object
+    /// streams again and again).
+    nodes: HashMap<ObjRef, Dictionary>,
     /// The page the link is on.
     index: usize,
 }
@@ -184,32 +248,60 @@ impl Resolver<'_> {
         Some(LinkTarget::Page { page, top })
     }
 
+    fn dests(&mut self) -> &(Option<Dictionary>, Option<Dictionary>) {
+        let doc = self.doc;
+        self.dests.get_or_insert_with(|| {
+            let catalog = doc.catalog().ok();
+            let dict = catalog.as_ref().and_then(|c| doc.get_dict(c, b"Dests"));
+            let tree = catalog.as_ref().and_then(|c| doc.get_dict(c, b"Names")).and_then(|n| doc.get_dict(&n, b"Dests"));
+            (dict, tree)
+        })
+    }
+
     /// PDF 1.1 style: `/Dests` dictionary in the catalog.
-    fn named_in_dests(&self, name: &[u8]) -> Option<Object> {
-        let catalog = self.doc.catalog().ok()?;
-        let dests = self.doc.get_dict(&catalog, b"Dests")?;
-        let value = dests.get(name)?;
-        self.doc.resolve(value).ok()
+    fn named_in_dests(&mut self, name: &[u8]) -> Option<Object> {
+        let value = self.dests().0.as_ref()?.get(name)?.clone();
+        self.doc.resolve(&value).ok()
     }
 
     /// PDF 1.2+: the `/Dests` name tree under the catalog's `/Names`.
-    fn named_in_tree(&self, name: &[u8]) -> Option<Object> {
-        let catalog = self.doc.catalog().ok()?;
-        let names = self.doc.get_dict(&catalog, b"Names")?;
-        let root = self.doc.get_dict(&names, b"Dests")?;
+    fn named_in_tree(&mut self, name: &[u8]) -> Option<Object> {
+        let root = self.dests().1.clone()?;
         self.search_tree(&root, name, 0)
     }
 
-    fn search_tree(&self, node: &Dictionary, name: &[u8], depth: usize) -> Option<Object> {
+    /// A name tree node's `/Limits`: its first and last key.
+    fn limits(&self, node: &Dictionary) -> Option<(Vec<u8>, Vec<u8>)> {
+        let doc = self.doc;
+        let Ok(Object::Array(limits)) = doc.get_resolved(node, b"Limits") else { return None };
+        let [lo, hi] = &limits[..] else { return None };
+        let (lo, hi) = (doc.resolve(lo).ok()?, doc.resolve(hi).ok()?);
+        Some((lo.as_string()?.to_vec(), hi.as_string()?.to_vec()))
+    }
+
+    /// A kid of a name tree node.
+    fn tree_node(&mut self, kid: &Object) -> Option<Dictionary> {
+        if let Object::Reference(r) = kid
+            && let Some(node) = self.nodes.get(r)
+        {
+            return Some(node.clone());
+        }
+        let node = self.doc.resolve(kid).ok()?.as_dict()?.clone();
+        if let Object::Reference(r) = kid
+            && node.get(b"Kids").is_some()
+        {
+            self.nodes.insert(*r, node.clone());
+        }
+        Some(node)
+    }
+
+    fn search_tree(&mut self, node: &Dictionary, name: &[u8], depth: usize) -> Option<Object> {
         if depth > MAX_DEPTH {
             return None;
         }
         let doc = self.doc;
-        if let Ok(Object::Array(limits)) = doc.get_resolved(node, b"Limits")
-            && let [lo, hi] = &limits[..]
-            && let (Some(lo), Some(hi)) = (doc.resolve(lo).ok(), doc.resolve(hi).ok())
-            && let (Some(lo), Some(hi)) = (lo.as_string(), hi.as_string())
-            && (name < lo || name > hi)
+        if let Some((lo, hi)) = self.limits(node)
+            && (name < lo.as_slice() || name > hi.as_slice())
         {
             return None;
         }
@@ -227,8 +319,27 @@ impl Resolver<'_> {
             }
         }
         if let Ok(Object::Array(kids)) = doc.get_resolved(node, b"Kids") {
+            // Kids are sorted by their limits: bisect (a large tree has
+            // thousands of nodes), then, if that fails in a badly made
+            // tree, try them all.
+            let (mut lo, mut hi) = (0, kids.len());
+            while lo < hi {
+                let mid = (lo + hi) / 2;
+                let Some(kid) = self.tree_node(&kids[mid]) else { break };
+                let Some((first, last)) = self.limits(&kid) else { break };
+                if name < first.as_slice() {
+                    hi = mid;
+                } else if name > last.as_slice() {
+                    lo = mid + 1;
+                } else {
+                    if let Some(found) = self.search_tree(&kid, name, depth + 1) {
+                        return Some(found);
+                    }
+                    break;
+                }
+            }
             for kid in &kids {
-                if let Some(kid) = doc.resolve(kid).ok().and_then(|k| k.as_dict().cloned())
+                if let Some(kid) = self.tree_node(kid)
                     && let Some(found) = self.search_tree(&kid, name, depth + 1)
                 {
                     return Some(found);

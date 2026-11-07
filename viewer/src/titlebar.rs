@@ -2,8 +2,13 @@
 //! minimize / maximize / close buttons, dragging, double-click to maximize,
 //! and resizing from the window edges.
 //!
-//! The window is created without system decorations so it looks and works
-//! the same everywhere (on GNOME/Wayland there would otherwise be none).
+//! On Linux and Windows the window is created without system decorations
+//! so it looks and works the same everywhere (on GNOME/Wayland there would
+//! otherwise be none). On macOS the native title bar is kept (its "traffic
+//! light" buttons are what Mac users expect), and these functions do nothing.
+
+/// Whether the system draws the window's title bar (macOS).
+pub const NATIVE: bool = cfg!(target_os = "macos");
 
 use eframe::egui::{
     self, Color32, CursorIcon, Id, Pos2, Rect, ResizeDirection, Sense, Stroke, StrokeKind, Vec2, ViewportCommand,
@@ -13,7 +18,7 @@ use eframe::egui::{
 const RESIZE_BORDER: f32 = 6.0;
 const BUTTON_SIZE: Vec2 = Vec2::new(34.0, 30.0);
 /// Width of the minimize / maximize / close buttons together.
-pub const BUTTONS_WIDTH: f32 = 3.0 * BUTTON_SIZE.x;
+pub const BUTTONS_WIDTH: f32 = if NATIVE { 0.0 } else { 3.0 * BUTTON_SIZE.x };
 
 fn is_maximized(ctx: &egui::Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false))
@@ -23,6 +28,9 @@ fn is_maximized(ctx: &egui::Context) -> bool {
 /// maximization on double-click. Call before adding the bar's widgets so
 /// they stay clickable.
 pub fn drag_area(ui: &mut egui::Ui, rect: Rect) {
+    if NATIVE {
+        return;
+    }
     let response = ui.interact(rect, Id::new("titlebar-drag"), Sense::click_and_drag());
     if response.double_clicked() {
         let maximized = is_maximized(ui.ctx());
@@ -34,6 +42,9 @@ pub fn drag_area(ui: &mut egui::Ui, rect: Rect) {
 
 /// Minimize, maximize/restore and close buttons, right-aligned in `ui`.
 pub fn window_buttons(ui: &mut egui::Ui) {
+    if NATIVE {
+        return;
+    }
     let ctx = ui.ctx().clone();
     ui.spacing_mut().item_spacing.x = 0.0;
     // Laid out right to left: close first.
@@ -52,6 +63,9 @@ pub fn window_buttons(ui: &mut egui::Ui) {
 
 /// Just a close button, for secondary windows.
 pub fn close_button(ui: &mut egui::Ui) {
+    if NATIVE {
+        return;
+    }
     if icon_button(ui, Icon::Close, "Close").clicked() {
         ui.ctx().send_viewport_cmd(ViewportCommand::Close);
     }
@@ -113,6 +127,9 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, tooltip: &str) -> egui::Response {
 /// draws a thin border so the window stands out from what's behind it.
 /// Call at the start of each frame.
 pub fn resize_edges(ctx: &egui::Context) {
+    if NATIVE {
+        return;
+    }
     let rect = ctx.content_rect();
     let border_color = ctx.global_style().visuals.widgets.noninteractive.bg_stroke.color;
     ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("window-border")))

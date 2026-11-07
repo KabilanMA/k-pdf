@@ -4,10 +4,12 @@
 //! - memory-mapping the file instead of reading it into RAM (the OS pages
 //!   in only what is touched);
 //! - parsing objects lazily, only when requested, with no global cache;
-//! - keeping only the most recently used decoded object stream in memory.
+//! - keeping only the few most recently used decoded object streams in
+//!   memory.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+#[cfg(not(windows))]
 use std::fs::File;
 use std::ops::Deref;
 use std::path::Path;
@@ -24,19 +26,31 @@ use crate::xref::{self, XrefEntry, XrefTable};
 const MAX_RESOLVE_DEPTH: u32 = 32;
 
 enum Source {
+    #[cfg(not(windows))]
     Mapped(memmap2::Mmap),
     Owned(Vec<u8>),
+    /// A file read into memory, shared by every document open on it.
+    #[cfg(windows)]
+    Shared(std::sync::Arc<[u8]>),
 }
 
 impl Deref for Source {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
+            #[cfg(not(windows))]
             Source::Mapped(m) => m,
             Source::Owned(v) => v,
+            #[cfg(windows)]
+            Source::Shared(d) => d,
         }
     }
 }
+
+/// Decoded object streams kept in memory. Consecutive lookups usually hit
+/// the same one, but walks such as the outline go back and forth between a
+/// few (the outline's, the destinations', the pages').
+const OBJSTM_CACHE: usize = 4;
 
 /// A decoded object stream (PDF 1.5+), kept around because consecutive
 /// lookups usually hit the same one.
@@ -119,7 +133,8 @@ pub struct Document {
     header_version: String,
     xref: RefCell<XrefTable>,
     reconstructed: Cell<bool>,
-    objstm: RefCell<Option<ObjStmCache>>,
+    /// Most recently used first.
+    objstm: RefCell<Vec<ObjStmCache>>,
     depth: Cell<u32>,
     /// Edited and added objects (not saved yet), seen in place of the
     /// file's own; see [`Document::set_overlay`].
@@ -128,7 +143,20 @@ pub struct Document {
 
 impl Document {
     /// Opens a PDF file by memory-mapping it.
+    ///
+    /// On Windows, a file that is mapped can't be replaced (as saving over
+    /// an open document does), so there it is read into memory instead,
+    /// once: documents open on the same unchanged file share it.
     pub fn open(path: impl AsRef<Path>) -> Result<Document> {
+        #[cfg(windows)]
+        let document = Self::from_source(Source::Shared(shared_file(path.as_ref())?));
+        #[cfg(not(windows))]
+        let document = Self::open_mapped(path.as_ref());
+        document
+    }
+
+    #[cfg(not(windows))]
+    fn open_mapped(path: &Path) -> Result<Document> {
         let file = File::open(path)?;
         if file.metadata()?.len() == 0 {
             return Err(Error::parse(0, "file is empty"));
@@ -170,7 +198,7 @@ impl Document {
             header_version,
             xref: RefCell::new(table),
             reconstructed: Cell::new(reconstructed),
-            objstm: RefCell::new(None),
+            objstm: RefCell::new(Vec::new()),
             depth: Cell::new(0),
             overlay: RefCell::new(HashMap::new()),
         };
@@ -243,7 +271,7 @@ impl Document {
     fn reconstruct(&self) -> Result<()> {
         let table = xref::reconstruct(&self.data)?;
         *self.xref.borrow_mut() = table;
-        *self.objstm.borrow_mut() = None;
+        self.objstm.borrow_mut().clear();
         self.reconstructed.set(true);
         Ok(())
     }
@@ -271,11 +299,12 @@ impl Document {
     /// document. Replaces any earlier overlay.
     pub fn set_overlay(&self, changes: &crate::writer::Changes) {
         let mut map = HashMap::new();
-        for (num, (_, obj)) in &changes.replace {
-            map.insert(*num, obj.clone());
-        }
         for (r, obj) in &changes.added {
             map.insert(r.num, obj.clone());
+        }
+        // A replacement wins, also over a new object it replaces.
+        for (num, (_, obj)) in &changes.replace {
+            map.insert(*num, obj.clone());
         }
         *self.overlay.borrow_mut() = map;
     }
@@ -331,13 +360,23 @@ impl Document {
     }
 
     fn load_from_objstm(&self, num: u32, stream: u32, index: u32) -> Result<Object> {
-        let cached = self.objstm.borrow().as_ref().is_some_and(|c| c.num == stream);
-        if !cached {
-            let cache = self.load_objstm(stream)?;
-            *self.objstm.borrow_mut() = Some(cache);
+        let cached = self.objstm.borrow().iter().position(|c| c.num == stream);
+        match cached {
+            Some(0) => {}
+            Some(i) => {
+                let mut caches = self.objstm.borrow_mut();
+                let cache = caches.remove(i);
+                caches.insert(0, cache);
+            }
+            None => {
+                let cache = self.load_objstm(stream)?;
+                let mut caches = self.objstm.borrow_mut();
+                caches.truncate(OBJSTM_CACHE - 1);
+                caches.insert(0, cache);
+            }
         }
-        let cache = self.objstm.borrow();
-        let cache = cache.as_ref().expect("object stream cache was just filled");
+        let caches = self.objstm.borrow();
+        let cache = &caches[0];
         // Trust `index` if it agrees with the stream's header; otherwise
         // search by object number.
         let offset = match cache.members.get(index as usize) {
@@ -597,3 +636,33 @@ fn version_tuple(v: &str) -> (u32, u32) {
     let mut it = v.split('.').map(|p| p.parse().unwrap_or(0));
     (it.next().unwrap_or(0), it.next().unwrap_or(0))
 }
+
+/// The contents of `path`, shared with documents already open on the same
+/// version of the file (same size and modification time). Kept only while
+/// some document uses it.
+#[cfg(windows)]
+fn shared_file(path: &Path) -> Result<std::sync::Arc<[u8]>> {
+    use std::sync::{Arc, Mutex, Weak};
+    type Entry = (std::path::PathBuf, u64, Option<std::time::SystemTime>, Weak<[u8]>);
+    static OPEN: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+
+    let meta = std::fs::metadata(path)?;
+    if meta.len() == 0 {
+        return Err(Error::parse(0, "file is empty"));
+    }
+    let key = std::path::absolute(path)?;
+    let modified = meta.modified().ok();
+    let mut open = OPEN.lock().unwrap_or_else(|e| e.into_inner());
+    open.retain(|e| e.3.strong_count() > 0);
+    if let Some(data) = open
+        .iter()
+        .find(|e| e.0 == key && e.1 == meta.len() && e.2 == modified)
+        .and_then(|e| e.3.upgrade())
+    {
+        return Ok(data);
+    }
+    let data: Arc<[u8]> = std::fs::read(path)?.into();
+    open.push((key, meta.len(), modified, Arc::downgrade(&data)));
+    Ok(data)
+}
+

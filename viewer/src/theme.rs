@@ -5,6 +5,7 @@
 //! Everything here is set once at startup: no assets are bundled, and the
 //! only file read is one UI font (about 1 MB), if present.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use eframe::egui::{
@@ -162,25 +163,41 @@ pub fn base_fonts() -> FontDefinitions {
     defs
 }
 
-/// The desktop's UI font, from the usual places (no font scan): Adwaita
-/// Sans (GNOME), Inter, Noto Sans, Cantarell, Segoe UI (Windows).
+/// The desktop's UI font, from the usual places (no font scan): Segoe UI
+/// on Windows, San Francisco on macOS, and on Linux Adwaita Sans (GNOME),
+/// Inter, Noto Sans or Cantarell. Only a font that parses is used (egui
+/// would stop at one it can't read).
 fn system_ui_font() -> Option<Vec<u8>> {
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
-        "/usr/share/fonts/truetype/adwaita-sans/AdwaitaSans-Regular.ttf",
-        "/usr/share/fonts/adwaita-sans/AdwaitaSans-Regular.ttf",
-        "/usr/share/fonts/rsms-inter-fonts/Inter-Regular.otf",
-        "/usr/share/fonts/opentype/inter/Inter-Regular.otf",
-        "/usr/share/fonts/inter/Inter-Regular.otf",
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/abattis-cantarell-fonts/Cantarell-Regular.otf",
-        "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-    ];
-    CANDIDATES.iter().find_map(|p| std::fs::read(p).ok())
+    #[cfg(windows)]
+    let candidates: Vec<String> = {
+        let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+        vec![format!("{windir}\\Fonts\\segoeui.ttf")]
+    };
+    #[cfg(target_os = "macos")]
+    let candidates: Vec<String> =
+        ["/System/Library/Fonts/SFNS.ttf", "/System/Library/Fonts/Helvetica.ttc"].map(String::from).to_vec();
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let candidates: Vec<String> = LINUX_FONTS.iter().map(|s| s.to_string()).collect();
+    candidates
+        .iter()
+        .filter_map(|p| std::fs::read(p).ok())
+        .find(|data| ttf_parser::Face::parse(data, 0).is_ok())
 }
+
+#[cfg(not(any(windows, target_os = "macos")))]
+const LINUX_FONTS: &[&str] = &[
+    "/usr/share/fonts/adwaita-sans-fonts/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/truetype/adwaita-sans/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/adwaita-sans/AdwaitaSans-Regular.ttf",
+    "/usr/share/fonts/rsms-inter-fonts/Inter-Regular.otf",
+    "/usr/share/fonts/opentype/inter/Inter-Regular.otf",
+    "/usr/share/fonts/inter/Inter-Regular.otf",
+    "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/abattis-cantarell-fonts/Cantarell-Regular.otf",
+    "/usr/share/fonts/cantarell/Cantarell-Regular.otf",
+];
 
 /// A button in the accent color, for a dialog's main action.
 pub fn primary_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
@@ -204,3 +221,37 @@ pub fn floating_frame(ui: &egui::Ui) -> egui::Frame {
         .inner_margin(Margin::symmetric(10, 6))
         .shadow(Shadow { offset: [0, 6], blur: 20, spread: 0, color: p.shadow })
 }
+
+/// Dark pages for reading: set by the viewer, read by everything drawn on
+/// the page (form fields, the text editor) so it matches the rendering.
+static DARK_PAGES: AtomicBool = AtomicBool::new(false);
+
+pub fn set_dark_pages(dark: bool) {
+    DARK_PAGES.store(dark, Ordering::Relaxed);
+}
+
+pub fn dark_pages() -> bool {
+    DARK_PAGES.load(Ordering::Relaxed)
+}
+
+/// A color of the document as shown on the page: changed like the page
+/// when pages are dark (alpha kept).
+pub fn on_page(c: Color32) -> Color32 {
+    if !dark_pages() {
+        return c;
+    }
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    let [r, g, b] = k_pdf::dark_page_color([r, g, b]);
+    Color32::from_rgba_unmultiplied(r, g, b, a)
+}
+
+/// The page background: white, or the dark page color.
+pub fn paper(dark: bool) -> Color32 {
+    if dark {
+        let [r, g, b] = k_pdf::dark_page_color([255, 255, 255]);
+        Color32::from_rgb(r, g, b)
+    } else {
+        Color32::WHITE
+    }
+}
+

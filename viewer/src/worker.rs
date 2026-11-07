@@ -40,16 +40,19 @@ pub struct DocInfo {
     pub repaired: bool,
     /// Form fields, filled in by the viewer.
     pub fields: Vec<k_pdf::FormField>,
+    /// Sections and subsections (the file's bookmarks), for the sidebar.
+    pub outline: Vec<k_pdf::OutlineItem>,
 }
 
 pub enum Reply {
     Opened(Box<DocInfo>),
     OpenFailed(PathBuf, String),
-    Page { page: usize, scale: f32, image: egui::ColorImage },
+    /// `dark`: rendered as a dark page (see [`Pool::set_dark_pages`]).
+    Page { page: usize, scale: f32, dark: bool, image: egui::ColorImage },
     PageFailed { page: usize, error: String },
     /// A page's text (in reading order) and links.
     Chars { page: usize, chars: Arc<Vec<TextChar>>, links: Arc<Vec<Link>> },
-    Thumb { page: usize, image: egui::ColorImage },
+    Thumb { page: usize, dark: bool, image: egui::ColorImage },
     /// A document added with [`Pool::add_document`] is open; its pages have
     /// keys `first..first + page_sizes.len()`.
     Added { path: PathBuf, first: usize, page_sizes: Vec<egui::Vec2> },
@@ -66,11 +69,22 @@ struct State {
     /// and a counter that changes whenever they do.
     overlay: Option<Arc<k_pdf::Changes>>,
     overlay_version: u64,
+    /// Render pages dark for reading.
+    dark: bool,
     /// Pending jobs, most important first.
     jobs: Vec<Job>,
-    /// Jobs a thread is working on right now.
-    running: Vec<Job>,
+    /// Jobs a thread is working on right now, and whether it renders them
+    /// dark: a job started before dark pages were switched doesn't count
+    /// as the one wanted now.
+    running: Vec<(Job, bool)>,
     closed: bool,
+}
+
+impl State {
+    /// Whether `job` is being worked on as currently wanted.
+    fn is_running(&self, job: &Job) -> bool {
+        self.running.contains(&(*job, self.dark))
+    }
 }
 
 struct Shared {
@@ -93,6 +107,7 @@ impl Pool {
                 added: Vec::new(),
                 overlay: None,
                 overlay_version: 0,
+                dark: false,
                 jobs: Vec::new(),
                 running: Vec::new(),
                 closed: false,
@@ -131,7 +146,7 @@ impl Pool {
         let mut jobs: Vec<Job> = pages
             .iter()
             .map(|&page| Job::Render { page, scale })
-            .filter(|j| !st.running.contains(j))
+            .filter(|j| !st.is_running(j))
             .collect();
         jobs.extend(st.jobs.iter().filter(|j| matches!(j, Job::Chars { .. })));
         jobs.extend(st.jobs.iter().filter(|j| matches!(j, Job::Thumb { .. })));
@@ -147,7 +162,7 @@ impl Pool {
         let new: Vec<Job> = thumbs
             .iter()
             .map(|&(page, scale)| Job::Thumb { page, scale })
-            .filter(|j| !st.running.contains(j))
+            .filter(|j| !st.is_running(j))
             .collect();
         st.jobs.extend(new);
         self.shared.wake.notify_all();
@@ -163,6 +178,18 @@ impl Pool {
         self.shared.wake.notify_all();
     }
 
+    /// Renders pages dark for reading (or normally again). Pages already
+    /// rendered must be requested again; replies say which way they were
+    /// rendered, so late ones can be dropped.
+    pub fn set_dark_pages(&self, dark: bool) {
+        let mut st = self.shared.state.lock().unwrap();
+        if st.dark != dark {
+            st.dark = dark;
+            st.jobs.clear();
+        }
+        self.shared.wake.notify_all();
+    }
+
     /// Opens another document next to the main one (to insert its pages).
     /// Answered with [`Reply::Added`] or [`Reply::AddFailed`].
     pub fn add_document(&self, path: PathBuf) {
@@ -174,7 +201,7 @@ impl Pool {
     pub fn want_chars(&self, page: usize) {
         let mut st = self.shared.state.lock().unwrap();
         let job = Job::Chars { page };
-        if !st.jobs.contains(&job) && !st.running.contains(&job) {
+        if !st.jobs.contains(&job) && !st.is_running(&job) {
             st.jobs.push(job);
             self.shared.wake.notify_all();
         }
@@ -307,9 +334,11 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                         break; // another document was added, or edits changed
                     }
                     let job = st.jobs.remove(0);
-                    st.running.push(job);
-                    job
+                    let dark = st.dark;
+                    st.running.push((job, dark));
+                    (job, dark)
                 };
+                let (job, dark) = job;
                 // Which document the page belongs to.
                 let key = job.page();
                 let d = starts.partition_point(|&s| s <= key).saturating_sub(1);
@@ -317,14 +346,15 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                     (Some((doc, pages)), Some((renderer, extractor))) => {
                         // Thumbnails keep the fields as saved in the file.
                         renderer.set_hide_form_fields(has_form && d == 0 && matches!(job, Job::Render { .. }));
-                        run_job(job.with_page(key - starts[d]), doc, pages, renderer, extractor)
+                        renderer.set_dark_pages(dark);
+                        run_job(job.with_page(key - starts[d]), doc, pages, renderer, extractor, dark)
                             .map(|r| r.with_page_offset(starts[d]))
                     }
                     _ => None,
                 };
                 {
                     let mut st = shared.state.lock().unwrap();
-                    if let Some(i) = st.running.iter().position(|j| *j == job) {
+                    if let Some(i) = st.running.iter().position(|r| *r == (job, dark)) {
                         st.running.remove(i);
                     }
                 }
@@ -405,6 +435,7 @@ fn run_job(
     pages: &[k_pdf::Page],
     renderer: &mut Renderer,
     extractor: &mut TextExtractor,
+    dark: bool,
 ) -> Option<Reply> {
     // A bug on one page must not take down the thread.
     let guard = |f: &mut dyn FnMut() -> Reply| {
@@ -424,10 +455,11 @@ fn run_job(
             guard(&mut || match renderer.render_page(p, scale as f64) {
                 Ok(img) => Reply::Thumb {
                     page,
+                    dark,
                     image: egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels),
                 },
                 // The sidebar just keeps showing a blank page.
-                Err(_) => Reply::Thumb { page, image: egui::ColorImage::filled([1, 1], egui::Color32::WHITE) },
+                Err(_) => Reply::Thumb { page, dark, image: egui::ColorImage::filled([1, 1], crate::theme::paper(dark)) },
             })
         }
         Job::Render { page: p, scale } => {
@@ -439,6 +471,7 @@ fn run_job(
                 Ok(img) => Reply::Page {
                     page: p,
                     scale,
+                    dark,
                     image: egui::ColorImage::from_rgba_premultiplied([img.width as usize, img.height as usize], &img.pixels),
                 },
                 Err(e) => Reply::PageFailed { page: p, error: e.to_string() },
@@ -457,6 +490,7 @@ fn doc_info(doc: &Document, pages: &[k_pdf::Page], path: PathBuf) -> DocInfo {
         encrypted: doc.is_encrypted(),
         repaired: doc.was_repaired(),
         fields: k_pdf::form_fields(doc).unwrap_or_default(),
+        outline: k_pdf::outline(doc, pages),
     }
 }
 
@@ -482,7 +516,7 @@ fn metadata(doc: &Document) -> Vec<(&'static str, String)> {
 }
 
 /// `D:20240131120000+01'00'` → `2024-01-31 12:00:00 +01:00`.
-fn pretty_date(raw: &str) -> String {
+pub fn pretty_date(raw: &str) -> String {
     let s = raw.strip_prefix("D:").unwrap_or(raw);
     let digits: String = s.chars().take_while(char::is_ascii_digit).collect();
     if digits.len() < 8 {

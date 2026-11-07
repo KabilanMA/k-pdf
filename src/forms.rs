@@ -493,7 +493,7 @@ pub fn fill_form(doc: &Document, fields: &[FormField], values: &[(ObjRef, FieldV
 }
 
 /// PDF text string: PDFDocEncoding when possible, UTF-16BE otherwise.
-fn encode_text_string(s: &str) -> Vec<u8> {
+pub(crate) fn encode_text_string(s: &str) -> Vec<u8> {
     let reverse: HashMap<char, u8> = (0..=255u8).filter_map(|b| Some((BaseEncoding::PdfDoc.decode(b)?, b))).collect();
     if let Some(bytes) = s.chars().map(|c| reverse.get(&c).copied()).collect::<Option<Vec<u8>>>() {
         return bytes;

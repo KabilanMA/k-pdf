@@ -118,9 +118,10 @@ impl Form {
     }
 }
 
+/// A field's color as shown on the page (dark pages included).
 fn color(c: [f32; 3]) -> Color32 {
     let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-    Color32::from_rgb(r, g, b)
+    crate::theme::on_page(Color32::from_rgb(r, g, b))
 }
 
 /// Text size on screen: the field's own size, or one that fits its height.

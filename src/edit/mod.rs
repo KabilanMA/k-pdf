@@ -15,6 +15,7 @@
 //! Limits: text drawn inside form XObjects, rotated or skewed text, and
 //! invisible text (e.g. OCR layers) are not editable.
 
+pub mod annotate;
 mod content;
 pub mod fonts;
 mod redact;

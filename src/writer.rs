@@ -227,7 +227,8 @@ pub fn write_document_with_options(
     }
     // New objects, and replacements for objects missing from the xref.
     let mut rest: Vec<_> = replace.into_values().chain(changed.into_values()).collect();
-    rest.extend(changes.added.iter().cloned());
+    // (A new object that was replaced since is written once, replaced.)
+    rest.extend(changes.added.iter().filter(|(r, _)| !changes.replace.contains_key(&r.num)).cloned());
     rest.retain(|(r, _)| used.contains(&r.num));
     rest.sort_by_key(|(r, _)| r.num);
     for (r, obj) in rest {
