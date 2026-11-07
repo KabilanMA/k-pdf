@@ -20,6 +20,7 @@ USAGE:
     k-pdf-cli note      <in.pdf> <out.pdf> <page> <left> <top> <text>
     k-pdf-cli blocks  <file.pdf> <page>
     k-pdf-cli crop    <in.pdf> <out.pdf> <left> <top> <right> <bottom> [pages]
+    k-pdf-cli rotate  <in.pdf> <out.pdf> <degrees> [pages]
     k-pdf-cli edit    <in.pdf> <out.pdf> <page> <block> <new text>
     k-pdf-cli redact  <in.pdf> <out.pdf> <page> <left> <top> <right> <bottom>
     k-pdf-cli redact  <in.pdf> <out.pdf> --text <words> [pages]
@@ -44,6 +45,8 @@ COMMANDS:
              radio buttons and choices as name=<option>
     crop     Keep only the given area of pages (points from the top-left corner of the
              page as shown; all pages, or e.g. \"1,3-5\"); \"crop in out none\" uncrops
+    rotate   Turn pages clockwise by 90, 180 or 270 degrees (negative: counterclockwise);
+             all pages, or e.g. \"1,3-5\"
     blocks   List the editable text blocks of a page (1-based)
     edit     Replace a text block (numbered as by `blocks`) with new text, keeping
              its font, size and color
@@ -72,6 +75,7 @@ fn main() -> ExitCode {
         Some("note") if args.len() == 7 => note(&args[1..]),
         Some("blocks") if args.len() == 3 => blocks(&args[1], &args[2]),
         Some("crop") if args.len() >= 4 => crop(&args[1..]),
+        Some("rotate") if args.len() == 4 || args.len() == 5 => rotate(&args[1..]),
         Some("redact") if args.len() >= 4 => redact(&args[1..]),
         Some("compress") if args.len() >= 3 => compress(&args[1..]),
         Some("edit") if args.len() == 6 => edit(&args[1], &args[2], &args[3], &args[4], &args[5]),
@@ -137,6 +141,28 @@ fn crop(args: &[String]) -> CliResult {
     let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
     k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
     println!("wrote {output} ({} pages cropped)", pages.len());
+    Ok(())
+}
+
+fn rotate(args: &[String]) -> CliResult {
+    let (input, output) = (&args[0], &args[1]);
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    let degrees: i32 = args[2].parse().map_err(|_| format!("{:?} isn't a number of degrees", args[2]))?;
+    let doc = Document::open(input)?;
+    let count = doc.page_count()?;
+    let pages = match args.get(3) {
+        Some(spec) => parse_page_list(spec, count)?,
+        None => (0..count).collect(),
+    };
+    let mut changes = k_pdf::Changes::default();
+    for &p in &pages {
+        k_pdf::edit::rotate_page(&doc, p, degrees, &mut changes)?;
+    }
+    let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+    k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
+    println!("wrote {output}: {} pages turned {degrees}°", pages.len());
     Ok(())
 }
 

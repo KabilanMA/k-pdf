@@ -35,9 +35,9 @@ The core reader depends only on `flate2` (pure-Rust deflate) and `memmap2`. Rend
     It costs nothing at startup: no assets are bundled and nothing is animated in the background. The only extra is one font file read, adding about 2.5 MB of memory.
   - The toolbar doubles as the title bar:
     - Open, Save, Undo and Redo on the left;
-    - the editing tools (Edit text, Crop, Redact) as one group;
+    - the editing tools (Edit text, Crop, Rotate, Redact, Comment) as one group;
     - the file name in the middle, with a dot for unsaved changes;
-    - a "⋯" menu (Save as, Compress, Document info, Appearance) and round window buttons on the right.
+    - a "⋯" menu (Save as, Print, Compress, Document info, Appearance) and round window buttons on the right. The menu stays open while the theme or dark pages are changed, so the result can be seen and changed again.
 
     Drag it to move the window, double-click it to maximize, and resize from any edge. In narrow windows the buttons show icons only, and then Undo and Redo move into the menu.
   - Dark pages for reading (moon button, "⋯" menu, Ctrl+Shift+D). Rendered pages are recolored in OKLab:
@@ -54,18 +54,24 @@ The core reader depends only on `flate2` (pure-Rust deflate) and `memmap2`. Rend
   - The welcome screen opens a file, and dragging a file over the window shows where to drop it.
   - Editing text (Edit mode, Ctrl+E): click a paragraph to edit it in place, as in a word processor. The text keeps its font, size and color; a toolbar changes the font, size, bold, italic, underline and color of the selection (or of what you type next), and the paragraph's alignment, line spacing and width. Text re-wraps to the paragraph's width. Click an empty spot to add a new text box; delete all of a paragraph's text to remove it.
   - Cropping (Crop mode): drag on a page to choose the area to keep (adjust it with the handles, or drag it to move it), then crop that page, every page, or the pages you list (e.g. "1, 3-5") to the same area. Crops can be removed per page or all at once; Ctrl+Z / Ctrl+Shift+Z undo and redo them.
-  - Redacting (Redact mode): drag over anything on a page to mark it, or type words to mark every place they appear; click a mark to unmark it. "Redact" then removes what is under the marks for good (text, image pixels, shapes, links and notes) and draws black boxes in its place. Ctrl+Z undoes it until the file is saved.
+  - Rotating (Rotate mode): a panel turns the page being read, every page, or the pages you list (e.g. "1, 3-5") a quarter turn left or right, or upside down. Ctrl+R / Ctrl+Shift+R turn the current page right / left without the panel. Each rotation is one undo step.
+  - Redacting (Redact mode): with text selected, turning Redact mode on marks the selection (each line's area); otherwise drag over anything on a page to mark it, or type words to mark every place they appear; click a mark to unmark it. "Redact" then removes what is under the marks for good (text, image pixels, shapes, links and notes) and draws black boxes in its place. Ctrl+Z undoes it until the file is saved.
   - Filling in forms: text fields (single and multi-line, password, length limits), check boxes, radio buttons and drop-down lists are editable on the page. Save writes the values into the file, with appearances that every PDF viewer shows.
   - Inserting PDFs: hovering the gap between two thumbnails (or above the first, or below the last) shows a "+" button; click it and pick a PDF to insert its pages there.
+  - Presenting (the screen button in the toolbar, "Present" in the ⋯ menu, F5 from the first page, Shift+F5 from the current one): the window goes full screen and shows one page at a time on black, rendered at screen resolution (the next ones are rendered ahead). Slides change with a fade by default (or a push, or no transition; 0.45 s, eased). →, Space, Page Down, Enter, a click or the wheel go forward; ←, Backspace, Page Up, a right click or the wheel back; Home / End; a number then Enter jumps to that slide; B / W blank the screen black / white; Esc ends and goes back to the page last shown. The pointer hides when it doesn't move, and the slide number shows while it does. The presenter view, a second window with the app's own title bar (P shows or hides it, closing it ends the show; whether it opens is a setting in the ⋯ menu), shows the current and next slide, the page's comments as speaker notes, a timer with pause and reset, and buttons for moving, the transition and blanking. With more than one screen, the presenter view fills the main screen (the primary one, or the one the viewer was on) and the slides fill another; "Slides on" and "Swap screens" in the presenter view move them (screens listed twice by the system are shown once). With one screen, the slides fill it and the presenter view is a normal window. See `viewer/src/present.rs`.
+  - Printing ("Print…" in the ⋯ menu, Ctrl+P): a dialog with the printer (each printer's own paper sizes, and whether it can print two-sided and in color), copies and collating, the pages (all, the current one, or a list like "1-3, 5"; odd or even page numbers only; reverse order), two-sided (long or short edge), orientation (automatic, portrait, landscape), pages per sheet (1, 2, 4, 6, 9, 16), scaling (fit to paper, actual size, shrink large pages), paper size, color or black and white, and whether highlights and notes are printed. A preview shows each sheet. The pages are written to a temporary PDF with the unsaved changes and form values (and without comments if they are left out, via `edit::annotate::remove_comments`), then sent:
+    - Linux and macOS: to CUPS with `lp` (printers from `lpstat`, their options from `lpoptions -l`); CUPS does pages per sheet, scaling, orientation and paper. See `viewer/src/print/cups.rs`.
+    - Windows: through GDI. The options go into the printer's DEVMODE, and each sheet is rendered by k-pdf (at up to 300 dpi) and drawn on the printer's page; pages per sheet, scaling and black and white are done by k-pdf. See `viewer/src/print/windows.rs`.
   - Compressing ("Compress…", next to Save as): saves a smaller copy, including unsaved changes, that looks and works exactly the same. JPEG optimization is on by default. Brotli is an option that is off by default; ticking it shows a warning that many PDF readers can't open such files. The dialog then shows how much smaller the copy is, and can open it.
   - Rearranging pages: drag a thumbnail in the sidebar to move the page. Save (Ctrl+S) writes the new order to the file, Save as (Ctrl+Shift+S) to a copy, and Ctrl+Z undoes a move or an insertion, and Ctrl+Shift+Z (or Ctrl+Y) redoes it. Closing the window or opening another file with unsaved changes asks whether to save them.
   - Continuous scrolling, zoom (the floating controls, Ctrl+wheel, Ctrl +/-) and page jumping.
   - Text selection and copying. Selection follows reading order: it stays within a column and skips margin line numbers (as in review copies of papers).
   - Links: double-click follows a link within the document (contents, sections, figures, citations); web links open in the browser only with Ctrl+click. Hovering shows where a link goes, and Alt+← (or the mouse back button) returns.
-  - A document info window: a separate window (it can be moved outside the viewer), resizable from its edges and corners, with long values wrapped.
+  - A document info window (file, file size, PDF version, pages, page size, metadata): a separate window (it can be moved outside the viewer), resizable from its edges and corners, with long values wrapped.
   - Several threads render pages in parallel, and the pages just ahead in the scroll direction are prepared in advance.
 
 - **Links:** `page_links` returns a page's links with their rectangles and targets: web addresses, or a page and position in the document (go-to actions, explicit and named destinations, next/previous/first/last page).
+- **Rotating:** `edit::rotate_page` turns a page by a multiple of 90° (its `/Rotate`, set on the page itself so an inherited value can't come back); the content isn't touched.
 - **Cropping:** `edit::crop_page` sets the visible area of a page (its `/CropBox`), given in points as the page is shown, or removes the crop.
 - **Redaction:** `edit::redact_page` removes what is in areas of a page and blacks them out. Text is taken out of the content, with the rest of each line kept in place. Image pixels are blacked out in a new copy of the image. Shapes lying inside an area and annotations over it are removed. Reused content (form XObjects) is redacted in a copy for that page. `edit::find_text` finds the areas covering a phrase on a page.
 - **Lossless compression:** `compress::compress` writes a smaller copy without changing anything it shows or contains:
@@ -128,6 +134,7 @@ cargo build --release --workspace
 ./target/release/k-pdf-cli reorder in.pdf out.pdf 3,1,2      # or ranges: 5-10,1-4
 ./target/release/k-pdf-cli merge   out.pdf a.pdf b.pdf ...
 ./target/release/k-pdf-cli crop    in.pdf out.pdf 40 30 572 400 [1,3-5]   # left top right bottom
+./target/release/k-pdf-cli rotate  in.pdf out.pdf 90 [1,3-5]               # clockwise; -90 or 270 for left
 ./target/release/k-pdf-cli redact  in.pdf out.pdf 1 72 90 300 120         # page left top right bottom
 ./target/release/k-pdf-cli redact  in.pdf out.pdf --text "Jane Doe" [1,3-5]
 ./target/release/k-pdf-cli compress in.pdf out.pdf [--no-jpeg] [--brotli]   # lossless; --brotli: see below
@@ -168,6 +175,8 @@ Viewer keys:
 | Hover between thumbnails, click "+" | Insert the pages of another PDF there |
 | Ctrl+Z | Undo the last text edit, page move or insertion |
 | Ctrl+Shift+Z, Ctrl+Y | Redo what was undone |
+| Ctrl+R / Ctrl+Shift+R | Rotate the current page right / left |
+| Rotate | Panel: rotate this page, all pages, or listed pages ("1, 3-5") left, right or 180° |
 | ✂ Crop, then drag on a page | Choose the area to keep; the panel crops this page, all pages, or listed pages ("1, 3-5") |
 | ⬛ Redact, then drag on a page | Mark an area to redact (click a mark to unmark it); the panel can mark every occurrence of some words, and "Redact" applies the marks |
 | Ctrl+E | Edit mode on/off: click text to edit it, or an empty spot to add text |
@@ -175,6 +184,9 @@ Viewer keys:
 | Click a form field | Fill it in (Tab moves to the next field) |
 | Ctrl+S | Save the changes (page order, inserted pages, form values) |
 | Ctrl+Shift+S | Save as a new file |
+| Ctrl+P | Print |
+| F5 / Shift+F5 | Present from the first page / from the current page |
+| While presenting | → Space PgDn Enter click: next · ← Backspace PgUp right-click: back · Home / End · number + Enter: go to slide · B / W: black / white screen · P: presenter view · Esc: end |
 
 As a library:
 
@@ -232,7 +244,10 @@ The default build includes compression, which compiles two C libraries (libdefla
 | `viewer/src/worker.rs` | Viewer's background render threads (shared job queue) |
 | `viewer/src/selection.rs` | Text selection: hit-testing, word/line ranges, caret movement |
 | `viewer/src/crop.rs` | Crop mode: choosing the area, crop panel |
+| `viewer/src/rotate.rs` | Rotate mode: the rotate panel |
 | `viewer/src/compress.rs` | The Compress dialog and the Brotli warning |
+| `viewer/src/present.rs` | Presenting: full-screen slides, transitions, the presenter view |
+| `viewer/src/print/` | Printing: the Print dialog and preview (`mod.rs`), CUPS (`cups.rs`), Windows GDI (`windows.rs`) |
 | `viewer/src/redact.rs` | Redact mode: marking areas, redact panel |
 | `viewer/src/editor.rs` | Edit mode: in-place rich-text editor and formatting toolbar |
 | `viewer/src/form.rs` | Editable form fields drawn over the page |
@@ -269,7 +284,7 @@ Every file passed in both modes. The default mode made the 300 files 10.1% small
 
 ### Known limitations (planned for later phases)
 - **Encrypted PDFs:** detected, but not yet decrypted. Structure and page count work; text, metadata and page rendering return `Error::Encrypted`, and they can't be saved.
-- **Cropping** only hides the rest of the page (as every PDF tool does); the hidden content is still in the file. Pages inserted from other PDFs can't be cropped until the file is saved and reopened.
+- **Cropping** only hides the rest of the page (as every PDF tool does); the hidden content is still in the file. Pages inserted from other PDFs can't be cropped or rotated until the file is saved and reopened.
 - **Redaction** covers what the page itself draws. Some things are not changed:
   - document metadata (title, author, XMP), bookmarks, and alternate text in the structure tree;
   - the glyphs of redacted letters, which remain in embedded fonts;
@@ -280,6 +295,7 @@ Every file passed in both modes. The default mode made the 300 files 10.1% small
 - **Text editing:** edited text has a fixed position on the page, so text that gets longer can run into what's below it (other content doesn't move). Text inside form XObjects, rotated or invisible text, and Type 3 fonts aren't editable. Fonts with CFF outlines (most `.otf` files) are embedded whole rather than subset, which makes files bigger. The on-screen editor shows text in the closest installed font; the saved page uses the real one. Small caps and ligatures become plain letters when edited.
 - **Forms:** JavaScript is not run, so calculated fields, formatting, validation and "gray hint" placeholder text don't work. Signature fields can't be signed, and rich text values are saved as plain text. Thumbnails show the values as last saved. Pages of inserted documents keep their fields as they were, without them being editable.
 - **Merging** keeps the first document's metadata, bookmarks and form fields; those of inserted documents are not carried over (their pages, with links and annotations, are). Encrypted PDFs can't be inserted.
+- **Printing** was tested on Linux with stand-in CUPS commands (no printer was attached): the dialog, the options passed to `lp` and the printed file were checked. The Windows code compiles and passes clippy but hasn't been run on a Windows printer yet. Printing on Linux and macOS needs CUPS (`lp`); without a printer set up, the dialog says none were found.
 - **Compression** never loses anything, so its gains are modest on files that are already efficient. It does nothing for JPEG 2000, JBIG2 or CCITT images, which it copies as they are. It also doesn't subset fonts (unused glyphs are data too). Brotli files can't be opened by many readers, including Poppler-based ones (Evince, Okular, pdftotext), older Acrobat and Foxit, and many phone apps and printers. Brotli files are also no longer valid PDF/A. JPEG XL, which the PDF Association also plans to add, has no published specification for PDFs yet, so it isn't offered.
 - **Saving** rewrites the whole file, so digital signatures no longer validate. (Links and bookmarks keep pointing to the same page wherever it moved.)
 - **Images:** JPEG 2000 (JPX) and JBIG2 images are not decoded and are shown as gray boxes.

@@ -33,6 +33,8 @@ enum Job {
 pub struct DocInfo {
     pub path: PathBuf,
     pub version: String,
+    /// Size of the file in bytes (as opened).
+    pub file_size: u64,
     /// Displayed page sizes in points (after rotation).
     pub page_sizes: Vec<egui::Vec2>,
     pub metadata: Vec<(&'static str, String)>,
@@ -483,6 +485,7 @@ fn run_job(
 
 fn doc_info(doc: &Document, pages: &[k_pdf::Page], path: PathBuf) -> DocInfo {
     DocInfo {
+        file_size: std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0),
         path,
         version: doc.version(),
         page_sizes: page_sizes(doc, pages),

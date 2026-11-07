@@ -557,6 +557,29 @@ pub fn crop_page(doc: &Document, page: usize, rect: Option<[f32; 4]>, changes: &
     Ok(())
 }
 
+/// Turns page `page` by `degrees` (a multiple of 90; positive is
+/// clockwise, as the page is shown) by setting its `/Rotate`, and records
+/// it in `changes` like [`edit_text`]. The page's content isn't touched.
+pub fn rotate_page(doc: &Document, page: usize, degrees: i32, changes: &mut Changes) -> Result<()> {
+    if degrees % 90 != 0 {
+        return Err(Error::Object(format!("pages turn in steps of 90°, not {degrees}°")));
+    }
+    doc.set_overlay(changes);
+    let pages = doc.pages()?;
+    let p = pages.get(page).ok_or_else(|| Error::Object(format!("page {} does not exist", page + 1)))?;
+    if p.id.num == 0 {
+        return Err(Error::Object("this page can't be rotated (it isn't stored as an object of its own)".into()));
+    }
+    let rotation = (p.rotation() + degrees as i64).rem_euclid(360);
+    let mut dict = p.dict.clone();
+    // Set explicitly (also 0), so a rotation inherited from the page tree
+    // can't come back.
+    dict.set(b"Rotate".to_vec(), Object::Integer(rotation));
+    changes.replace.insert(p.id.num, (p.id, Object::Dictionary(dict)));
+    doc.set_overlay(changes);
+    Ok(())
+}
+
 /// Picks the font for a style: the page's own font if it matches and has
 /// all of `text`, else a system font, else a standard one. Returns the face
 /// and its resource name on the page.

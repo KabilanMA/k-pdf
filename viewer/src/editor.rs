@@ -191,6 +191,25 @@ impl Editor {
         Ok(before)
     }
 
+    /// Turns pages (indices into the open file's pages) by `degrees`
+    /// clockwise. Returns the changes from before, for undo; on failure
+    /// nothing is changed.
+    pub fn rotate(&mut self, pages: &[usize], degrees: i32) -> Result<Changes, String> {
+        let doc = self.doc.as_ref().ok_or("the document isn't open")?;
+        self.session = None;
+        let before = self.changes.clone();
+        for &p in pages {
+            if let Err(e) = pdfedit::rotate_page(doc, p, degrees, &mut self.changes) {
+                self.changes = before;
+                doc.set_overlay(&self.changes);
+                return Err(format!("page {}: {e}", p + 1));
+            }
+        }
+        self.texts.clear();
+        self.preview = None;
+        Ok(before)
+    }
+
     /// Displayed size of every page of the open file, with the edits.
     pub fn page_sizes(&self) -> Option<Vec<egui::Vec2>> {
         let doc = self.doc.as_ref()?;

@@ -16,7 +16,10 @@ mod comments;
 mod form;
 mod icons;
 mod links;
+mod present;
+mod print;
 mod redact;
+mod rotate;
 #[cfg(feature = "script")]
 mod script;
 mod selection;
@@ -230,6 +233,44 @@ fn build_pdf(
     k_pdf::write_document_with_changes(&refs, pages, &changes, out).map_err(|e| e.to_string())
 }
 
+/// Prints pages (as for [`save_pages`]): writes them to a temporary PDF,
+/// leaves out the comments if asked, and sends it to the printer.
+fn print_job(
+    files: &[PathBuf],
+    pages: &[(usize, usize)],
+    form_edits: &[(k_pdf::ObjRef, k_pdf::FieldValue)],
+    text_changes: &k_pdf::Changes,
+    job: &print::Job,
+) -> Result<String, String> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = |part: &str| std::env::temp_dir().join(format!("k-pdf-print-{}-{n}{part}.pdf", std::process::id()));
+    let (file, bare) = (temp(""), temp("-bare"));
+    let result = (|| {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&file).map_err(|e| e.to_string())?);
+        build_pdf(files, pages, form_edits, text_changes, &mut out)?;
+        std::io::Write::flush(&mut out).map_err(|e| e.to_string())?;
+        drop(out);
+        let mut to_print = &file;
+        if !job.settings.comments {
+            let doc = k_pdf::Document::open(&file).map_err(|e| e.to_string())?;
+            let count = doc.page_count().map_err(|e| e.to_string())?;
+            let mut changes = k_pdf::Changes::default();
+            for p in 0..count {
+                k_pdf::edit::annotate::remove_comments(&doc, p, &mut changes).map_err(|e| e.to_string())?;
+            }
+            let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+            let out = std::fs::File::create(&bare).map_err(|e| e.to_string())?;
+            k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::io::BufWriter::new(out)).map_err(|e| e.to_string())?;
+            to_print = &bare;
+        }
+        print::send(to_print, job)
+    })();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&bare);
+    result
+}
+
 /// Writes `target` through `write`: into a file next to it that is then
 /// renamed over it, so the target is never left half-written.
 fn write_atomically(
@@ -326,6 +367,9 @@ struct Viewer {
     edit_mode: bool,
     /// Crop mode: dragging on a page chooses the area to keep.
     crop_mode: bool,
+    /// Rotate mode: the panel for turning pages.
+    rotate_mode: bool,
+    rotate: rotate::Rotate,
     crop: crop::Crop,
     /// Redact mode: marking areas to remove for good.
     redact_mode: bool,
@@ -342,6 +386,13 @@ struct Viewer {
     /// (size of the file as opened, report) or an error.
     compress: compress::Compress,
     compressing: Option<std::sync::mpsc::Receiver<Result<(u64, k_pdf::compress::CompressReport), String>>>,
+    /// A presentation in progress, and whether presenting shows the
+    /// presenter view (remembered while the app runs).
+    present: Option<present::Show>,
+    presenter_view: bool,
+    /// The Print dialog, and a job being prepared and sent.
+    print: print::Print,
+    printing: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     /// Where the pages are shown on screen (for the crop panel).
     view_rect: Rect,
     /// Measured width of the toolbar's controls in its full (0) and
@@ -415,12 +466,18 @@ impl Viewer {
             form: form::Form::default(),
             edit_mode: false,
             crop_mode: false,
+            rotate_mode: false,
+            rotate: rotate::Rotate::default(),
             crop: crop::Crop::default(),
             redact_mode: false,
             redact: redact::Redact::default(),
             comments: comments::Comments::default(),
             compress: compress::Compress::default(),
             compressing: None,
+            present: None,
+            presenter_view: true,
+            print: print::Print::default(),
+            printing: None,
             theme: egui::ThemePreference::System,
             dark_pages: false,
             window_title: "k-pdf".into(),
@@ -674,6 +731,7 @@ impl Viewer {
 
     fn set_crop_mode(&mut self, on: bool) {
         if on {
+            self.rotate_mode = false;
             self.close_comment();
             self.comments.placing = false;
             self.set_edit_mode(false);
@@ -682,6 +740,42 @@ impl Viewer {
         self.crop_mode = on;
         self.crop.clear();
         self.selection = None;
+    }
+
+    /// Rotate mode shows the rotate panel; the pages stay usable.
+    fn set_rotate_mode(&mut self, on: bool) {
+        if on {
+            self.close_comment();
+            self.comments.placing = false;
+            self.set_edit_mode(false);
+            self.set_crop_mode(false);
+            self.redact_mode = false;
+        }
+        self.rotate_mode = on;
+    }
+
+    /// Turns the pages at `positions` (in the view) by `degrees`
+    /// clockwise, as one undo step.
+    fn rotate_pages(&mut self, positions: &[usize], degrees: i32) {
+        // Positions → pages of the open file (pages inserted from other
+        // files can't be rotated until the file is saved and reopened).
+        let pages: Vec<usize> = positions
+            .iter()
+            .filter_map(|&pos| self.order.get(pos).and_then(|&key| self.sources.get(key)))
+            .filter(|(d, _)| *d == 0)
+            .map(|&(_, p)| p)
+            .collect();
+        if pages.is_empty() {
+            self.error = Some("Pages inserted from other files can't be rotated until the file is saved.".into());
+            return;
+        }
+        match self.editor.rotate(&pages, degrees) {
+            Ok(before) => {
+                self.record(Undo::Text(before));
+                self.content_changed();
+            }
+            Err(e) => self.error = Some(format!("Could not rotate: {e}")),
+        }
     }
 
     /// Shows pages dark for reading, or normally again: every page and
@@ -707,14 +801,41 @@ impl Viewer {
     /// another file is opened.
     fn set_redact_mode(&mut self, on: bool) {
         if on {
+            self.rotate_mode = false;
             self.close_comment();
             self.comments.placing = false;
+            // Before anything clears the selection.
+            self.mark_selection_for_redaction();
             self.set_edit_mode(false);
             self.crop_mode = false;
             self.crop.clear();
         }
         self.redact_mode = on;
         self.selection = None;
+    }
+
+    /// Turning redact mode on with text selected: the selected text is
+    /// marked (each line's area), ready to apply.
+    fn mark_selection_for_redaction(&mut self) {
+        let Some(sel) = self.selection.filter(|s| !s.is_empty()) else { return };
+        let Some(&(0, page)) = self.sources.get(sel.page) else {
+            self.redact.message = Some("pages inserted from other files can't be redacted until the file is saved".into());
+            return;
+        };
+        let Some(chars) = self.chars.get(&sel.page) else { return };
+        let marks: Vec<redact::Mark> = selection::highlight_rects(chars, sel.range())
+            .into_iter()
+            // A little room, so nothing of the glyphs shows.
+            .map(|rect| redact::Mark { page, rect: rect.expand(0.5) })
+            .collect();
+        let lines = marks.len();
+        let new = self.redact.add(marks);
+        self.redact.message = Some(match (lines, new) {
+            (0, _) => return,
+            (_, 0) => "the selected text was already marked".into(),
+            (1, _) => "marked the selected text — Apply redacts it".into(),
+            (n, _) => format!("marked the selected text ({n} lines) — Apply redacts it"),
+        });
     }
 
     fn handle_redact_action(&mut self, action: redact::Action) {
@@ -786,6 +907,7 @@ impl Viewer {
             self.crop_mode = false;
             self.crop.clear();
             self.redact_mode = false;
+            self.rotate_mode = false;
         }
         self.edit_mode = on;
         self.selection = None;
@@ -798,6 +920,7 @@ impl Viewer {
     /// The Comment tool: the next click on a page places a note there.
     fn set_placing_note(&mut self, on: bool) {
         if on {
+            self.rotate_mode = false;
             self.close_comment();
             self.set_edit_mode(false);
             self.set_crop_mode(false);
@@ -1052,6 +1175,158 @@ impl Viewer {
         if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
             self.save(path, after);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Presenting
+    // ------------------------------------------------------------------
+
+    /// Starts presenting, from the first page or the current one.
+    fn start_presentation(&mut self, ctx: &egui::Context, from_current: bool) {
+        if self.doc.is_none() || self.page_count() == 0 {
+            return;
+        }
+        self.close_comment();
+        self.set_edit_mode(false);
+        self.set_crop_mode(false);
+        self.redact_mode = false;
+        self.rotate_mode = false;
+        self.comments.placing = false;
+        self.selection = None;
+        let position = if from_current { self.current_page } else { 0 };
+        // Full screen once the screens are known (next frame).
+        self.present = Some(present::Show::new(position, self.presenter_view, self.zoom));
+        ctx.request_repaint();
+    }
+
+    fn end_presentation(&mut self, ctx: &egui::Context, show: present::Show) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        self.zoom = show.saved_zoom;
+        self.last_want = (Vec::new(), 0.0);
+        // Back where the presentation ended.
+        self.go_to_page(show.position);
+    }
+
+    /// A frame of the presentation: the slide full screen, the presenter
+    /// view if it is on, and what the keys, clicks and buttons asked for.
+    fn presentation(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        let Some(doc) = &self.doc else { return };
+        let Some(mut show) = self.present.take() else { return };
+        // First frame: with several screens, the slides go on one and the
+        // presenter view on the main one; with one, full screen.
+        if !show.screens_read && !show.set_screens(screens(frame)) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+        }
+        if show.move_slides {
+            show.move_slides = false;
+            if let Some(screen) = show.slides_screen.and_then(|i| show.screens.get(i)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::SetMonitor(screen.index));
+            }
+        }
+        let sizes: Vec<Vec2> = self.order.iter().map(|&k| doc.page_sizes[k]).collect();
+        let count = sizes.len();
+        show.position = show.position.min(count.saturating_sub(1));
+        let title = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut navs = ctx.input(|i| show.keys(i));
+
+        // Speaker notes: the comments on the page.
+        let notes = match self.sources.get(self.order[show.position]) {
+            Some(&(0, page)) if show.presenter => self
+                .comments
+                .on_page(&self.editor, page)
+                .iter()
+                .filter(|c| !c.text.trim().is_empty())
+                .map(|c| c.text.trim().to_string())
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        {
+            let (textures, order) = (&self.textures, &self.order);
+            let texture = |pos: usize| order.get(pos).and_then(|k| textures.get(k)).map(|t| t.texture.id());
+            egui::CentralPanel::no_frame().show(ui, |ui| navs.extend(present::audience(ui, &mut show, &sizes, &texture)));
+            if show.presenter {
+                let notes = present::Notes { title, notes };
+                navs.extend(present::presenter(&ctx, &mut show, &sizes, &texture, &notes));
+            }
+        }
+
+        // Render the slide (and its neighbors) to fill the screen.
+        let screen = ctx.content_rect().size();
+        let size = sizes[show.position];
+        self.zoom = (screen.x / size.x.max(1.0)).min(screen.y / size.y.max(1.0));
+        for pos in [show.position, show.position + 1] {
+            if let Some(t) = self.order.get(pos).and_then(|k| self.textures.get_mut(k)) {
+                t.last_used = self.frame;
+            }
+        }
+        self.scrolling_down = true;
+        self.request_pages(&ctx, &[show.position], ctx.pixels_per_point());
+
+        let mut exit = false;
+        for nav in navs {
+            match nav {
+                present::Nav::Next => show.go(show.position + 1, count),
+                present::Nav::Prev => show.go(show.position.saturating_sub(1), count),
+                present::Nav::First => show.go(0, count),
+                present::Nav::Last => show.go(count - 1, count),
+                present::Nav::GoTo(p) => show.go(p, count),
+                present::Nav::Blank(color) => show.blank = if show.blank == Some(color) { None } else { Some(color) },
+                present::Nav::TogglePresenter => {
+                    show.presenter = !show.presenter;
+                    self.presenter_view = show.presenter;
+                }
+                present::Nav::SlidesOn(screen) => show.place(screen),
+                present::Nav::SwapScreens => show.swap_screens(),
+                present::Nav::Exit => exit = true,
+            }
+        }
+        if exit {
+            self.end_presentation(&ctx, show);
+        } else {
+            self.present = Some(show);
+        }
+    }
+
+    /// Opens the Print dialog (what is being typed in a comment is kept).
+    fn open_print_dialog(&mut self, ctx: &egui::Context) {
+        if self.doc.is_none() {
+            return;
+        }
+        self.close_comment();
+        self.print.open(ctx);
+    }
+
+    /// Writes the pages to print (with the unsaved changes, and without
+    /// comments if they are left out) to a temporary file and sends it, in
+    /// the background.
+    fn start_print(&mut self, job: print::Job) {
+        let Some(doc) = &self.doc else { return };
+        if doc.encrypted {
+            self.print.state = print::State::Done(Err("encrypted files can't be printed yet".into()));
+            return;
+        }
+        let mut files = vec![doc.path.clone()];
+        files.extend(self.added.iter().cloned());
+        let pages: Vec<(usize, usize)> = job.positions.iter().map(|&pos| self.sources[self.order[pos]]).collect();
+        let form_edits = self.form.edits();
+        let text_changes = self.editor.changes().clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = print_job(&files, &pages, &form_edits, &text_changes, &job);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.printing = Some(rx);
+    }
+
+    fn poll_print(&mut self) {
+        let Some(rx) = &self.printing else { return };
+        let Ok(result) = rx.try_recv() else { return };
+        self.printing = None;
+        self.print.state = print::State::Done(result);
     }
 
     /// Asks where to save a compressed copy of the current state (with
@@ -1437,8 +1712,25 @@ impl Viewer {
             return;
         }
 
+        // (Shift first: plain F5 would also match Shift+F5.)
+        if pressed(Modifiers::SHIFT, Key::F5) {
+            self.start_presentation(ctx, true);
+        }
+        if pressed(Modifiers::NONE, Key::F5) {
+            self.start_presentation(ctx, false);
+        }
+        if pressed(Modifiers::COMMAND, Key::P) && self.printing.is_none() {
+            self.open_print_dialog(ctx);
+        }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::D) {
             self.set_dark_pages(!self.dark_pages);
+        }
+        // (Shift first: Ctrl+R would also match Ctrl+Shift+R.)
+        if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::R) {
+            self.rotate_pages(&[self.current_page], -90);
+        }
+        if pressed(Modifiers::COMMAND, Key::R) {
+            self.rotate_pages(&[self.current_page], 90);
         }
         if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::H) {
             self.highlight_selection(self.comments.color, false);
@@ -1705,6 +1997,12 @@ impl Viewer {
             {
                 self.set_crop_mode(!self.crop_mode);
             }
+            if icons::button(ui, Icon::RotateRight, labels.then_some("Rotate"), self.rotate_mode, true)
+                .on_hover_text("Rotate this page, some pages or all of them (Ctrl+R / Ctrl+Shift+R: this page)")
+                .clicked()
+            {
+                self.set_rotate_mode(!self.rotate_mode);
+            }
             if icons::button(ui, Icon::Redact, labels.then_some("Redact"), self.redact_mode, true)
                 .on_hover_text("Black out text, images or areas, removing what was there for good")
                 .clicked()
@@ -1725,6 +2023,12 @@ impl Viewer {
         {
             self.show_sidebar = !self.show_sidebar;
         }
+        if icons::button(ui, Icon::Present, None, false, true)
+            .on_hover_text("Present: pages as full-screen slides (F5 from the start, Shift+F5 from this page)")
+            .clicked()
+        {
+            self.start_presentation(ui.ctx(), false);
+        }
         if icons::button(ui, Icon::Moon, None, self.dark_pages, true)
             .on_hover_text("Dark pages for reading: light text on a dark page, colors kept (Ctrl+Shift+D)")
             .clicked()
@@ -1737,14 +2041,18 @@ impl Viewer {
     /// (and undo/redo when the toolbar is narrow).
     fn more_menu(&mut self, ui: &mut egui::Ui, level: usize) {
         let response = icons::button(ui, Icon::More, None, false, true).on_hover_text("More");
-        egui::Popup::menu(&response).show(|ui| {
+        // The menu stays open while choosing the appearance; the other
+        // items close it.
+        egui::Popup::menu(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
             ui.set_min_width(200.0);
             if level >= 2 {
                 if ui.add_enabled(!self.undo.is_empty(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
                     self.undo();
+                    ui.close();
                 }
                 if ui.add_enabled(!self.redo.is_empty(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
                     self.redo();
+                    ui.close();
                 }
                 ui.separator();
             }
@@ -1752,18 +2060,39 @@ impl Viewer {
                 .add_enabled(self.saving.is_none(), egui::Button::new("Save as…").shortcut_text("Ctrl+Shift+S"))
                 .clicked()
             {
+                ui.close();
                 self.save_as_dialog(After::Nothing);
+            }
+            if ui.add(egui::Button::new("Present").shortcut_text("F5")).clicked() {
+                ui.close();
+                self.start_presentation(ui.ctx(), false);
+            }
+            if ui.add(egui::Button::new("Present from this page").shortcut_text("Shift+F5")).clicked() {
+                ui.close();
+                self.start_presentation(ui.ctx(), true);
+            }
+            ui.checkbox(&mut self.presenter_view, "Presenter view when presenting")
+                .on_hover_text("A second window with the next slide, notes and a timer (P switches it while presenting)");
+            ui.separator();
+            if ui
+                .add_enabled(self.printing.is_none(), egui::Button::new("Print…").shortcut_text("Ctrl+P"))
+                .clicked()
+            {
+                ui.close();
+                self.open_print_dialog(ui.ctx());
             }
             if ui
                 .add_enabled(self.saving.is_none() && self.compressing.is_none(), egui::Button::new("Compress…"))
                 .on_hover_text("Save a smaller copy that loses nothing")
                 .clicked()
             {
+                ui.close();
                 self.compress.open();
             }
             ui.separator();
             if ui.selectable_label(self.show_info, "Document info").clicked() {
                 self.show_info = !self.show_info;
+                ui.close();
             }
             ui.separator();
             ui.weak("Appearance");
@@ -1931,6 +2260,7 @@ impl Viewer {
         let Some(doc) = &self.doc else { return };
         let mut rows: Vec<(String, String)> = vec![
             ("File".into(), doc.path.display().to_string()),
+            ("File size".into(), file_size(doc.file_size)),
             ("PDF version".into(), doc.version.clone()),
             ("Pages".into(), self.order.len().to_string()),
         ];
@@ -2411,7 +2741,7 @@ impl eframe::App for Viewer {
         ctx.request_repaint();
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.frame += 1;
         self.handle_replies(&ctx);
@@ -2422,6 +2752,11 @@ impl eframe::App for Viewer {
             if self.prompt.is_none() {
                 self.prompt = Some(After::Close);
             }
+        }
+        if self.present.is_some() && self.doc.is_some() {
+            self.presentation(ui, frame);
+            self.take_screenshot(&ctx);
+            return;
         }
         titlebar::resize_edges(&ctx);
 
@@ -2504,6 +2839,15 @@ impl eframe::App for Viewer {
         {
             self.handle_crop_action(action);
         }
+        if self.rotate_mode
+            && self.doc.is_some()
+            && let Some(action) = self.rotate.panel(&ctx, self.view_rect, self.current_page, self.order.len())
+        {
+            match action {
+                rotate::Action::Rotate { positions, degrees } => self.rotate_pages(&positions, degrees),
+                rotate::Action::Done => self.rotate_mode = false,
+            }
+        }
         if self.redact_mode
             && self.doc.is_some()
             && let Some(action) = self.redact.panel(&ctx, self.view_rect)
@@ -2514,6 +2858,17 @@ impl eframe::App for Viewer {
             self.page_pill(&ctx);
         }
         drop_highlight(&ctx);
+        self.poll_print();
+        if self.doc.is_some() {
+            let name = self.doc.as_ref().and_then(|d| d.path.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let sizes: Vec<Vec2> = self.order.iter().map(|&k| self.doc.as_ref().map_or(Vec2::ZERO, |d| d.page_sizes[k])).collect();
+            let (textures, order) = (&self.textures, &self.order);
+            let texture = |pos: usize| order.get(pos).and_then(|k| textures.get(k)).map(|t| t.texture.id());
+            let view = print::DocView { title: &name, sizes: &sizes, current: self.current_page, texture: &texture };
+            if let Some(print::Action::Print(job)) = self.print.show(&ctx, &view) {
+                self.start_print(job);
+            }
+        }
         self.poll_compress();
         match self.compress.show(&ctx) {
             Some(compress::Action::Start(options)) => self.start_compress(options),
@@ -2569,6 +2924,53 @@ impl Viewer {
 }
 
 /// What a redaction removed, in words.
+/// The screens (monitors), in the windowing system's order, with the main
+/// one marked: the primary screen, or else the one the viewer is on.
+fn screens(frame: &eframe::Frame) -> Vec<present::Screen> {
+    let Some(window) = frame.winit_window() else { return Vec::new() };
+    let monitors: Vec<_> = window.available_monitors().collect();
+    let main = window
+        .primary_monitor()
+        .and_then(|p| monitors.iter().position(|m| *m == p))
+        .or_else(|| window.current_monitor().and_then(|c| monitors.iter().position(|m| *m == c)))
+        .unwrap_or(0);
+    let mut out: Vec<present::Screen> = Vec::new();
+    let mut seen = Vec::new();
+    for (i, m) in monitors.iter().enumerate() {
+        // Some systems list a screen twice.
+        let key = (m.name(), m.position().x, m.position().y, m.size().width, m.size().height);
+        if seen.contains(&key) {
+            if i == main
+                && let Some(first) = seen.iter().position(|k| *k == key)
+            {
+                out[first].main = true;
+            }
+            continue;
+        }
+        seen.push(key);
+        out.push(present::Screen {
+            index: i,
+            name: m.name().unwrap_or_else(|| format!("Screen {}", out.len() + 1)),
+            size: (m.size().width, m.size().height),
+            main: i == main,
+        });
+    }
+    out
+}
+
+/// "1.24 MB (1,301,234 bytes)".
+fn file_size(bytes: u64) -> String {
+    let digits = bytes.to_string();
+    let mut grouped = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    if bytes < 1024 { format!("{grouped} bytes") } else { format!("{} ({grouped} bytes)", compress::size(bytes)) }
+}
+
 fn redaction_summary(done: &k_pdf::edit::Redacted) -> String {
     let count = |n: usize, one: &str, many: &str| match n {
         0 => None,
@@ -2618,4 +3020,14 @@ fn drop_highlight(ctx: &egui::Context) {
         egui::FontId::proportional(18.0),
         p.text,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn file_sizes() {
+        assert_eq!(super::file_size(512), "512 bytes");
+        assert_eq!(super::file_size(1_301_234), "1.24 MB (1,301,234 bytes)");
+        assert_eq!(super::file_size(45_000), "44 KB (45,000 bytes)");
+    }
 }

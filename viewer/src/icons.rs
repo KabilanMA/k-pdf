@@ -28,6 +28,9 @@ pub enum Icon {
     Sections,
     Comment,
     Highlight,
+    RotateLeft,
+    RotateRight,
+    Present,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -145,6 +148,21 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             closed(&[(6.0, 10.5), (12.0, 2.5), (14.5, 4.5), (8.5, 12.5)]);
             line(&[(6.0, 10.5), (4.5, 12.5), (6.5, 13.5), (8.5, 12.5)]);
             line(&[(1.5, 15.0), (14.5, 15.0)]);
+        }
+        Icon::RotateLeft | Icon::RotateRight => {
+            // A circular arrow, open at the top, its head at the top end.
+            let flip = |pts: Vec<(f32, f32)>| -> Vec<(f32, f32)> {
+                if icon == Icon::RotateLeft { pts.into_iter().map(|(x, y)| (16.0 - x, y)).collect() } else { pts }
+            };
+            line(&flip(arc(8.0, 8.5, 5.5, -60.0, 210.0)));
+            line(&flip(vec![(8.6, 1.6), (11.0, 3.7), (8.4, 5.6)]));
+        }
+        Icon::Present => {
+            // A screen on a stand, with a play triangle.
+            closed(&[(1.5, 2.5), (14.5, 2.5), (14.5, 11.5), (1.5, 11.5)]);
+            line(&[(8.0, 11.5), (8.0, 14.5)]);
+            line(&[(5.0, 14.5), (11.0, 14.5)]);
+            painter.add(Shape::convex_polygon(vec![p(6.5, 4.8), p(10.5, 7.0), p(6.5, 9.2)], color, Stroke::NONE));
         }
         Icon::Document => {
             closed(&[(3.0, 1.0), (10.0, 1.0), (13.5, 4.5), (13.5, 15.0), (3.0, 15.0)]);

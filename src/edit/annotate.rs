@@ -267,6 +267,29 @@ pub fn delete_comment(doc: &Document, page: usize, id: ObjRef, changes: &mut Cha
     Ok(())
 }
 
+/// Removes every comment from page `page` (highlights, notes and other
+/// markup, with their pop-up windows), keeping links and form fields; for
+/// printing without them. Returns how many were removed.
+pub fn remove_comments(doc: &Document, page: usize, changes: &mut Changes) -> Result<usize> {
+    doc.set_overlay(changes);
+    let pages = doc.pages()?;
+    let p = page_of(&pages, page)?;
+    let mut annots = page_annots(doc, p)?;
+    let before = annots.len();
+    annots.retain(|a| {
+        let subtype = doc.resolve(a).ok().and_then(|o| {
+            o.as_dict().and_then(|d| doc.get_resolved(d, b"Subtype").ok()).and_then(|s| s.as_name().map(<[u8]>::to_vec))
+        });
+        !matches!(subtype.as_deref(), Some(s) if MARKUP.contains(&s) || s == b"Popup")
+    });
+    let removed = before - annots.len();
+    if removed > 0 {
+        set_page_annots(doc, p, annots, changes)?;
+        doc.set_overlay(changes);
+    }
+    Ok(removed)
+}
+
 /// The current date and time as a PDF date, in UTC.
 pub fn pdf_date_now() -> String {
     let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()) as i64;

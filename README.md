@@ -15,7 +15,10 @@ A fast, lightweight PDF viewer and editor for Linux, Windows and macOS.
 - **Fill in forms** — text fields, check boxes, radio buttons and lists.
 - **Rearrange pages** — drag thumbnails to reorder pages, or insert another PDF between any two pages.
 - **Crop** — one page, several, or all of them to the same area.
-- **Redact** — black out text, images or areas for good. The text under the box is removed from the file, not just covered.
+- **Rotate** — turn one page, a list of pages (like "1, 3-5"), or all of them.
+- **Redact** — black out text, images or areas for good. Select some text and click **Redact** to mark it, or drag over any area. The text under the box is removed from the file, not just covered.
+- **Present** — show the pages as full-screen slides with smooth fades between them, plus a presenter view with the next slide, your comments as speaker notes, and a timer. With two screens, the slides go on one and the presenter view on your main screen; you can switch them.
+- **Print** — choose the printer, copies, which pages (all, the current one, a range like "1-3, 5", odd or even, in reverse), two-sided printing, several pages per sheet, scaling, paper size, black and white, and whether comments are printed, with a preview of each sheet. Unsaved changes are printed.
 - **Compress** — make files smaller without losing any quality.
 - **Undo and redo** everything, and save when you're ready.
 - **Dark pages for reading** — the moon button turns pages dark: light text on a soft dark gray, with diagrams and colors kept recognizable (a light-blue box becomes a dark-blue one). Photos keep their real colors.
@@ -37,18 +40,21 @@ The warnings on Windows and macOS appear because the app isn't signed with a pai
 
 ## Using k-pdf
 
-Open a PDF with the **Open** button, by dropping a file onto the window, or with **Ctrl+O** (**Cmd+O** on a Mac). The toolbar has the editing tools: **Edit text**, **Crop**, **Redact** and **Comment**. The **⋯** menu has **Save as**, **Compress**, document info and the theme. Page navigation and zoom are at the bottom of the window.
+Open a PDF with the **Open** button, by dropping a file onto the window, or with **Ctrl+O** (**Cmd+O** on a Mac). The toolbar has the editing tools: **Edit text**, **Crop**, **Rotate**, **Redact** and **Comment**. The **⋯** menu has **Save as**, **Print**, **Compress**, document info and the theme. Page navigation and zoom are at the bottom of the window.
 
 | Shortcut | Action |
 |---|---|
 | Ctrl+O | Open a file |
 | Ctrl+S | Save |
 | Ctrl+Shift+S | Save as |
+| Ctrl+P | Print |
+| F5 / Shift+F5 | Present from the start / from this page (→ ← to move, B black screen, P presenter view, Esc to end) |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
 | Ctrl+E | Edit text on or off |
 | Ctrl+Shift+D | Dark pages for reading on or off |
 | Ctrl+Shift+B | Sidebar: pages, sections or comments |
 | Ctrl+Shift+H | Highlight the selected text |
+| Ctrl+R / Ctrl+Shift+R | Rotate the current page right / left |
 | Ctrl+C | Copy selected text |
 | Ctrl + mouse wheel, Ctrl +/- | Zoom |
 | Double-click a link | Go to that part of the document |

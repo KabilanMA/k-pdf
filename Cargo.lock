@@ -1264,6 +1264,7 @@ dependencies = [
  "k-pdf",
  "rfd",
  "ttf-parser",
+ "windows-sys 0.61.2",
  "winresource",
 ]
 

@@ -1025,3 +1025,29 @@ fn comments_are_added_changed_saved_and_deleted() {
     assert_eq!(left[0].id, list[0].id);
     let _ = note;
 }
+
+#[test]
+fn rotating_pages() {
+    // Page 1 inherits /Rotate 90 from the page tree; page 2 has none.
+    let mut b = Builder::new("1.4");
+    b.obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
+        .obj(2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 /MediaBox [0 0 600 800] /Rotate 90 >>")
+        .obj(3, "<< /Type /Page /Parent 2 0 R >>")
+        .obj(4, "<< /Type /Page /Parent 2 0 R /Rotate 0 >>");
+    let doc = Document::from_bytes(b.finish("/Root 1 0 R")).unwrap();
+    let mut changes = k_pdf::Changes::default();
+    k_pdf::edit::rotate_page(&doc, 0, -90, &mut changes).unwrap();
+    k_pdf::edit::rotate_page(&doc, 1, 90, &mut changes).unwrap();
+    k_pdf::edit::rotate_page(&doc, 1, 180, &mut changes).unwrap();
+    assert!(k_pdf::edit::rotate_page(&doc, 1, 45, &mut changes).is_err());
+
+    let mut out = Vec::new();
+    k_pdf::write_document_with_changes(&[&doc], &[(0, 0), (0, 1)], &changes, &mut out).unwrap();
+    let saved = Document::from_bytes(out).unwrap();
+    let pages = saved.pages().unwrap();
+    // The inherited 90 was turned back to 0 (set on the page itself).
+    assert_eq!(pages[0].rotation(), 0);
+    assert_eq!(pages[0].display_size(&saved), (600.0, 800.0));
+    assert_eq!(pages[1].rotation(), 270);
+    assert_eq!(pages[1].display_size(&saved), (800.0, 600.0));
+}

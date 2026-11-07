@@ -169,7 +169,7 @@ fn file_name(path: &std::path::Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     match bytes {
         b if b >= 1 << 20 => format!("{:.2} MB", b as f64 / (1 << 20) as f64),
         b if b >= 1 << 10 => format!("{:.0} KB", b as f64 / 1024.0),
