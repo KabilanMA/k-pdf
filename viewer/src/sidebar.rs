@@ -635,10 +635,10 @@ impl Sidebar {
                         action = Some(Action::DeleteDialog(pos));
                     }
                     ui.separator();
-                    if ui.button("Insert a PDF before this page…").clicked() {
+                    if ui.button("Insert a PDF or images before…").clicked() {
                         action = Some(Action::Insert(pos));
                     }
-                    if ui.button("Insert a PDF after this page…").clicked() {
+                    if ui.button("Insert a PDF or images after…").clicked() {
                         action = Some(Action::Insert(pos + 1));
                     }
                 });
@@ -708,7 +708,7 @@ impl Sidebar {
                 let zone = Rect::from_center_size(Pos2::new(origin.x + width / 2.0, y), Vec2::new(width, 2.0 * GAP_ZONE));
                 let response = ui
                     .interact(zone, ui.id().with(("insert", i)), Sense::click())
-                    .on_hover_text("Insert pages from another PDF here");
+                    .on_hover_text("Insert pages from another PDF, or images, here");
                 let x = origin.x + (width - thumb_w) / 2.0;
                 painter.line_segment([Pos2::new(x, y), Pos2::new(x + thumb_w, y)], Stroke::new(2.0, accent));
                 let center = Pos2::new(origin.x + width / 2.0, y);

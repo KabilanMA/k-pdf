@@ -10,6 +10,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod compress;
+mod dialog;
 mod crop;
 mod editor;
 mod comments;
@@ -20,6 +21,8 @@ mod present;
 mod print;
 mod redact;
 mod rotate;
+mod images;
+mod search;
 #[cfg(feature = "script")]
 mod script;
 mod selection;
@@ -29,7 +32,7 @@ mod titlebar;
 mod worker;
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -57,7 +60,8 @@ const SELECTION_COLOR: Color32 = Color32::from_rgba_premultiplied(16, 38, 80, 80
 /// Command-line options.
 #[derive(Default)]
 struct Args {
-    path: Option<PathBuf>,
+    /// A PDF, or images.
+    paths: Vec<PathBuf>,
     page: Option<usize>,
     screenshot: Option<PathBuf>,
     #[cfg(feature = "script")]
@@ -78,16 +82,38 @@ fn parse_args() -> Args {
                 std::process::exit(0);
             }
             Some("--help" | "-h") => {
-                println!("k-pdf {}: a PDF viewer and editor\n\nUsage: k-pdf [file.pdf] [--page N]", env!("CARGO_PKG_VERSION"));
+                println!("k-pdf {}: a PDF viewer and editor\n\nUsage: k-pdf [file.pdf | image...] [--page N]", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            _ => args.path = Some(PathBuf::from(a)),
+            _ => args.paths.push(PathBuf::from(a)),
         }
     }
     args
 }
 
 fn main() -> eframe::Result {
+    // Text recognition (OCR) runs its networks on a pool of threads, by
+    // default one per core; each thread's working memory adds up (over
+    // 800 MB on a 10-core machine). Four read a page nearly as fast.
+    if std::env::var_os("RTEN_NUM_THREADS").is_none() {
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
+        // SAFETY: no other threads exist yet.
+        unsafe { std::env::set_var("RTEN_NUM_THREADS", threads.to_string()) };
+    }
+    // glibc gives each thread that allocates its own memory arena and keeps
+    // what's freed in it; with the recognition threads that alone came to
+    // a few hundred megabytes. Two arenas are plenty for this app.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        unsafe extern "C" {
+            fn mallopt(param: std::ffi::c_int, value: std::ffi::c_int) -> std::ffi::c_int;
+        }
+        const M_ARENA_MAX: std::ffi::c_int = -8;
+        if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+            // SAFETY: a glibc tuning call, made before any other thread runs.
+            unsafe { mallopt(M_ARENA_MAX, 2) };
+        }
+    }
     let args = parse_args();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -190,6 +216,8 @@ enum After {
     Nothing,
     Close,
     Open(PathBuf),
+    /// Show images as a new document.
+    OpenImages(Vec<PathBuf>),
 }
 
 struct Saving {
@@ -281,6 +309,21 @@ fn print_job(
     result
 }
 
+/// What a file dialog was shown for.
+enum Asked {
+    Open,
+    /// Files to insert at a position.
+    Insert(usize),
+    /// Images to add to the images shown, at a position.
+    AddImages(usize),
+    /// Where to save the document, then what to do.
+    SaveAs(After),
+    /// Where to save the images as a PDF, then what to do.
+    SaveImages(After),
+    /// Where to save a compressed copy.
+    Compress(k_pdf::compress::CompressOptions),
+}
+
 /// Writes `target` through `write`: into a file next to it that is then
 /// renamed over it, so the target is never left half-written.
 fn write_atomically(
@@ -337,6 +380,14 @@ struct Viewer {
     /// Positioned text per page, for selection.
     chars: HashMap<usize, Arc<Vec<TextChar>>>,
     chars_requested: HashSet<usize>,
+    /// Ctrl+F: the search bar and its results.
+    search: search::Search,
+    /// Text read from pages' images (OCR), by page key: searched, and
+    /// selectable on pages without text of their own (scans). Kept until
+    /// the page changes.
+    ocr_text: HashMap<usize, Arc<Vec<k_pdf::TextChar>>>,
+    /// Pages whose images were asked to be read.
+    ocr_requested: HashSet<usize>,
     /// Links per page (arrive together with the text).
     links: HashMap<usize, Arc<Vec<Link>>>,
     /// Scroll positions to return to after following links (Alt+←).
@@ -395,6 +446,20 @@ struct Viewer {
     /// The Compress dialog, and a compression running in the background:
     /// (size of the file as opened, report) or an error.
     compress: compress::Compress,
+    /// Images opened as a document (instead of a PDF), shown and saved as
+    /// a PDF by `images`; or, with a PDF open, images being made into pages
+    /// to insert into it (`Images::insert_at`).
+    images: Option<images::Images>,
+    /// PDFs made of images, inserted into the open document.
+    image_files: images::TempFiles,
+    /// Cleaned-up pages waiting for their PDF to open: (PDF, keys of the
+    /// pages they replace, in order).
+    replacing: Vec<(PathBuf, Vec<usize>)>,
+    /// What to do once the images are saved (after the "save changes?"
+    /// question).
+    images_after: Option<After>,
+    /// The file dialog that is open (see `dialog`).
+    dialog: dialog::Dialog<Asked>,
     compressing: Option<std::sync::mpsc::Receiver<Result<(u64, k_pdf::compress::CompressReport), String>>>,
     /// A presentation in progress, and whether presenting shows the
     /// presenter view (remembered while the app runs).
@@ -459,6 +524,9 @@ impl Viewer {
             links: HashMap::new(),
             back: Vec::new(),
             chars_requested: HashSet::new(),
+            search: search::Search::default(),
+            ocr_text: HashMap::new(),
+            ocr_requested: HashSet::new(),
             selection: None,
             dragging: false,
             select_all_pending: None,
@@ -486,6 +554,11 @@ impl Viewer {
             redact: redact::Redact::default(),
             comments: comments::Comments::default(),
             compress: compress::Compress::default(),
+            images: None,
+            image_files: images::TempFiles::default(),
+            replacing: Vec::new(),
+            images_after: None,
+            dialog: dialog::Dialog::default(),
             compressing: None,
             present: None,
             presenter_view: true,
@@ -508,19 +581,113 @@ impl Viewer {
             #[cfg(feature = "script")]
             script: args.script.map(|p| script::Script::load(&p).unwrap_or_else(|e| panic!("script: {e}"))),
         };
-        if let Some(p) = args.path {
-            viewer.load(p);
-        }
+        viewer.open_files(args.paths);
         viewer
     }
 
     /// Opens a file, first asking about unsaved changes.
     fn open(&mut self, path: PathBuf) {
+        self.open_files(vec![path]);
+    }
+
+    /// Opens a PDF (the first one given), or else the images as a document.
+    fn open_files(&mut self, paths: Vec<PathBuf>) {
+        let after = match paths.iter().find(|p| !images::is_image(p)) {
+            Some(pdf) => After::Open(pdf.clone()),
+            None if paths.is_empty() => return,
+            None => After::OpenImages(paths),
+        };
         if self.is_modified() {
-            self.prompt = Some(After::Open(path));
+            self.prompt = Some(after);
         } else {
-            self.load(path);
+            self.proceed(&self.ctx.clone(), after);
         }
+    }
+
+    /// Shows `paths` as the pages of a new document (closing the PDF).
+    fn open_images(&mut self, paths: Vec<PathBuf>) {
+        self.close_document();
+        self.images = Some(images::Images::open(paths));
+        self.toolbar_widths = [None; 2];
+    }
+
+    /// Shows the open document's pages in the image editor, as they are
+    /// (unsaved edits included), to pick some and clean them up like
+    /// scans; Apply puts the cleaned pages in place of the old ones.
+    fn clean_up_pages(&mut self) {
+        let Some(doc) = &self.doc else { return };
+        // Each page from its file; the open file's with the unsaved edits.
+        let overlay = self.editor.is_modified().then(|| Arc::new(self.editor.changes().clone()));
+        let items: Vec<images::Item> = self
+            .order
+            .iter()
+            .map(|&key| {
+                let (d, page) = self.sources[key];
+                let path = if d == 0 { doc.path.clone() } else { self.added[d - 1].clone() };
+                images::Item { path, page: Some(page), key: Some(key), overlay: if d == 0 { overlay.clone() } else { None } }
+            })
+            .collect();
+        self.close_comment();
+        self.comments.placing = false;
+        self.set_edit_mode(false);
+        self.set_crop_mode(false);
+        self.set_rotate_mode(false);
+        self.set_redact_mode(false);
+        let mut images = images::Images::cleaning(items);
+        images.select_position(self.current_page);
+        self.images = Some(images);
+        self.toolbar_widths = [None; 2];
+    }
+
+    /// Cleaning up: makes the changed pages (then swaps them in, see
+    /// `poll_images`) and turns the pages kept as they are.
+    fn finish_cleaning(&mut self) {
+        let target = self.image_files.next();
+        let Some(images) = &mut self.images else { return };
+        let turned = images.apply(target);
+        let pending = images.is_saving();
+        for (key, turns) in turned {
+            let pos = self.position_of(key);
+            self.rotate_pages(&[pos], 90 * turns as i32);
+        }
+        if !pending {
+            self.cancel_inserting();
+        }
+    }
+
+    /// Closes the open PDF (to show images instead).
+    fn close_document(&mut self) {
+        self.close_search();
+        self.close_comment();
+        self.doc = None;
+        self.loading = None;
+        self.error = None;
+        self.textures.clear();
+        self.failed.clear();
+        self.chars.clear();
+        self.chars_requested.clear();
+        self.ocr_text.clear();
+        self.ocr_requested.clear();
+        self.links.clear();
+        self.sidebar.clear();
+        self.comments.reset();
+        self.back.clear();
+        self.order.clear();
+        self.sources.clear();
+        self.added.clear();
+        self.inserting.clear();
+        self.base_count = 0;
+        self.form = form::Form::default();
+        self.undo.clear();
+        self.redo.clear();
+        self.selection = None;
+        self.edit_mode = false;
+        self.crop_mode = false;
+        self.rotate_mode = false;
+        self.redact_mode = false;
+        self.show_info = false;
+        self.delete_dialog = None;
+        self.last_want = (Vec::new(), 0.0);
     }
 
     fn load(&mut self, path: PathBuf) {
@@ -536,6 +703,9 @@ impl Viewer {
         self.comments.placing = false;
         self.editor.open(&path);
         self.redact = redact::Redact::default();
+        if self.images.take().is_some() {
+            self.toolbar_widths = [None; 2];
+        }
         self.loading = Some(path.clone());
         self.error = None;
         self.pool.open(path);
@@ -544,6 +714,11 @@ impl Viewer {
     /// Whether pages were moved or inserted, or form fields filled in,
     /// since the file was opened or saved.
     fn is_modified(&self) -> bool {
+        if let Some(images) = &self.images
+            && self.doc.is_none()
+        {
+            return images.is_modified();
+        }
         self.pages_modified() || self.form.is_modified() || self.editor.is_modified()
     }
 
@@ -554,12 +729,13 @@ impl Viewer {
     /// The window title (shown in task bars and window switchers): the
     /// open file's name, then the application's.
     fn update_title(&mut self, ctx: &egui::Context) {
-        let title = match &self.doc {
-            Some(doc) => {
+        let title = match (&self.doc, &self.images) {
+            (None, Some(images)) => format!("{}{} — k-pdf", if images.is_modified() { "• " } else { "" }, images.title()),
+            (Some(doc), _) => {
                 let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 format!("{}{name} — k-pdf", if self.is_modified() { "• " } else { "" })
             }
-            None => "k-pdf".to_string(),
+            (None, None) => "k-pdf".to_string(),
         };
         if title != self.window_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -576,17 +752,172 @@ impl Viewer {
         self.editor.restore(k_pdf::Changes::default());
     }
 
-    /// Asks for a PDF to insert at `position`; its pages are inserted once
-    /// it has been opened (see `Reply::Added`).
+    /// Asks for a PDF or images to insert at `position`; the pages are
+    /// inserted once the file has been opened (see `Reply::Added`).
     fn insert_file_dialog(&mut self, position: usize) {
-        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("PDF documents and images", &[&["pdf", "PDF"], images::IMAGE_EXTENSIONS].concat())
+            .add_filter("PDF documents", &["pdf", "PDF"])
+            .add_filter("Images (one page each)", images::IMAGE_EXTENSIONS);
         if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(path) = dialog.pick_file() {
-            self.error = None;
+        self.dialog.pick(&self.ctx, Asked::Insert(position), dialog);
+    }
+
+    /// Inserts the chosen PDFs' pages, and images, at `position`.
+    fn insert_files(&mut self, paths: Vec<PathBuf>, position: usize) {
+        let (pictures, pdfs): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| images::is_image(p));
+        self.error = None;
+        if !pictures.is_empty() {
+            self.edit_images_to_insert(pictures, position);
+        }
+        for path in pdfs {
             self.inserting.push((path.clone(), position));
             self.pool.add_document(path);
+        }
+    }
+
+    /// Shows images to make into pages (with the same choices as images
+    /// opened on their own: as they are, or scanned) before they are
+    /// inserted at `position` (see `finish_inserting`).
+    fn edit_images_to_insert(&mut self, paths: Vec<PathBuf>, position: usize) {
+        self.close_comment();
+        self.comments.placing = false;
+        self.set_edit_mode(false);
+        self.set_crop_mode(false);
+        self.set_rotate_mode(false);
+        self.set_redact_mode(false);
+        self.images = Some(images::Images::inserting(paths, position));
+        self.toolbar_widths = [None; 2];
+    }
+
+    /// Makes the images' pages, then inserts them (in `poll_images`).
+    fn finish_inserting(&mut self) {
+        let target = self.image_files.next();
+        if let Some(images) = &mut self.images {
+            images.save(target);
+        }
+    }
+
+    /// Back to the document without inserting the images.
+    fn cancel_inserting(&mut self) {
+        self.images = None;
+        self.toolbar_widths = [None; 2];
+    }
+
+    /// Images: finished background work.
+    fn poll_images(&mut self, ctx: &egui::Context) {
+        let Some(images) = &mut self.images else { return };
+        match images.poll(ctx) {
+            Some(images::Event::Saved) if images.cleaning => {
+                // The cleaned pages: in place of the old ones (one undo
+                // step), back in the document.
+                let (old, path) = (std::mem::take(&mut images.replaced), images.saved_to.clone());
+                self.cancel_inserting();
+                if let Some(path) = path
+                    && self.doc.is_some()
+                {
+                    self.replacing.push((path.clone(), old));
+                    self.pool.add_document(path);
+                }
+            }
+            Some(images::Event::Saved) if images.insert_at.is_some() => {
+                // Made into pages: insert them, back in the document.
+                let (position, path) = (images.insert_at.unwrap_or(0), images.saved_to.clone());
+                self.cancel_inserting();
+                if let Some(path) = path
+                    && self.doc.is_some()
+                {
+                    self.inserting.push((path.clone(), position.min(self.order.len())));
+                    self.pool.add_document(path);
+                }
+            }
+            Some(images::Event::Saved) => {
+                if let Some(after) = self.images_after.take() {
+                    self.proceed(ctx, after);
+                }
+            }
+            Some(images::Event::SaveFailed) => self.images_after = None,
+            Some(images::Event::NothingRead(e)) => {
+                self.images = None;
+                self.images_after = None;
+                self.error = Some(e);
+            }
+            None => {}
+        }
+    }
+
+    /// Saves the images as a PDF: where they were saved before, or where
+    /// the user chooses. Then does `after`.
+    fn save_images(&mut self, ask: bool, after: After) {
+        let Some(images) = &mut self.images else { return };
+        if images.is_saving() || images.page_count() == 0 {
+            return;
+        }
+        // Scripted runs can't answer the file dialog.
+        #[cfg(feature = "script")]
+        let ask = ask && std::env::var_os("K_PDF_SCRIPT_SAVE").is_none();
+        #[cfg(feature = "script")]
+        let saved_to = images.saved_to.clone().or_else(|| std::env::var_os("K_PDF_SCRIPT_SAVE").map(PathBuf::from));
+        #[cfg(not(feature = "script"))]
+        let saved_to = images.saved_to.clone();
+        match (saved_to, ask) {
+            (Some(path), false) => {
+                images.save(path);
+                self.images_after = Some(after);
+            }
+            _ => {
+                let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]).set_file_name(images.suggested_name());
+                if let Some(dir) = images.saved_to.as_ref().and_then(|p| p.parent().map(Path::to_path_buf)).or_else(|| images.folder()) {
+                    dialog = dialog.set_directory(dir);
+                }
+                self.dialog.save(&self.ctx, Asked::SaveImages(after), dialog);
+            }
+        }
+    }
+
+    /// Asks for images to add to the images shown, at `at`.
+    fn add_images_dialog(&mut self, at: usize) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Add images or PDFs")
+            .add_filter("Images and PDFs", &images::addable_extensions())
+            .add_filter("Images", images::IMAGE_EXTENSIONS)
+            .add_filter("PDF documents", &["pdf"]);
+        if let Some(dir) = self.images.as_ref().and_then(|i| i.folder()) {
+            dialog = dialog.set_directory(dir);
+        }
+        self.dialog.pick(&self.ctx, Asked::AddImages(at), dialog);
+    }
+
+    /// Carries out what a file dialog was shown for, once it is closed.
+    fn poll_dialog(&mut self) {
+        let Some((asked, answer)) = self.dialog.poll() else { return };
+        let Some(paths) = answer else {
+            if let Asked::Compress(_) = asked {
+                self.compress.open(); // back to the options
+            }
+            return;
+        };
+        let first = paths[0].clone();
+        match asked {
+            Asked::Open => self.open_files(paths),
+            Asked::Insert(position) if self.doc.is_some() => self.insert_files(paths, position.min(self.order.len())),
+            Asked::AddImages(at) => {
+                if let Some(images) = &mut self.images {
+                    images.add(paths, Some(at));
+                }
+            }
+            Asked::SaveAs(after) if self.doc.is_some() => self.save(first, after),
+            Asked::SaveImages(after) => {
+                if let Some(images) = &mut self.images {
+                    images.save(first);
+                    self.images_after = Some(after);
+                }
+            }
+            Asked::Compress(options) if self.doc.is_some() => self.compress_to(first, options),
+            // The document was closed meanwhile.
+            _ => {}
         }
     }
 
@@ -754,7 +1085,13 @@ impl Viewer {
             self.chars.remove(&key);
             self.links.remove(&key);
             self.chars_requested.remove(&key);
+            self.ocr_text.remove(&key);
+            self.ocr_requested.remove(&key);
             self.sidebar.invalidate(key);
+        }
+        // The text may have changed: search again.
+        if self.search.query.is_some() {
+            self.search.dirty = true;
         }
         if self.selection.is_some_and(|s| page.is_none_or(|p| self.sources.get(s.page) == Some(&(0, p)))) {
             self.selection = None;
@@ -1258,19 +1595,25 @@ impl Viewer {
     }
 
     fn save_as_dialog(&mut self, after: After) {
+        if self.doc.is_none() && self.images.is_some() {
+            self.save_images(true, after);
+            return;
+        }
         let Some(doc) = &self.doc else { return };
         let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]).set_file_name(name);
         if let Some(dir) = doc.path.parent() {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(path) = dialog.save_file() {
-            self.save(path, after);
-        }
+        self.dialog.save(&self.ctx, Asked::SaveAs(after), dialog);
     }
 
     /// Saves over the open file (Ctrl+S).
     fn save_in_place(&mut self, after: After) {
+        if self.doc.is_none() && self.images.is_some() {
+            self.save_images(false, after);
+            return;
+        }
         if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
             self.save(path, after);
         }
@@ -1449,10 +1792,12 @@ impl Viewer {
         if let Some(dir) = doc.path.parent() {
             dialog = dialog.set_directory(dir);
         }
-        let Some(target) = dialog.save_file() else {
-            self.compress.open(); // back to the options
-            return;
-        };
+        self.dialog.save(&self.ctx, Asked::Compress(options), dialog);
+    }
+
+    /// Compresses the current state into `target`, in the background.
+    fn compress_to(&mut self, target: PathBuf, options: k_pdf::compress::CompressOptions) {
+        let Some(doc) = &self.doc else { return };
         let mut files = vec![doc.path.clone()];
         files.extend(self.added.iter().cloned());
         let pages: Vec<(usize, usize)> = self.order.iter().map(|&key| self.sources[key]).collect();
@@ -1519,6 +1864,7 @@ impl Viewer {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             After::Open(path) => self.load(path),
+            After::OpenImages(paths) => self.open_images(paths),
         }
     }
 
@@ -1555,8 +1901,15 @@ impl Viewer {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let when = match after {
-            After::Open(_) => "opening another file",
+            After::Open(_) | After::OpenImages(_) => "opening another file",
             _ => "closing",
+        };
+        let question = match self.images.as_ref().filter(|_| self.doc.is_none()) {
+            Some(images) if images.saved_to.is_some() => {
+                format!("\"{}\" has unsaved changes. Save them before {when}?", images.title())
+            }
+            Some(_) => format!("These pages haven't been saved as a PDF. Save them before {when}?"),
+            None => format!("\"{name}\" has unsaved changes. Save them before {when}?"),
         };
         #[derive(PartialEq)]
         enum Choice {
@@ -1569,7 +1922,7 @@ impl Viewer {
             ui.set_max_width(400.0);
             ui.heading("Save changes?");
             ui.add_space(6.0);
-            ui.label(format!("\"{name}\" has unsaved changes. Save them before {when}?"));
+            ui.label(question);
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 if theme::primary_button(ui, "Save").clicked() {
@@ -1594,6 +1947,7 @@ impl Viewer {
                 self.undo.clear();
                 self.redo.clear();
                 self.mark_unchanged();
+                self.images = None;
                 self.proceed(ctx, after);
             }
             Choice::Cancel => {}
@@ -1601,9 +1955,15 @@ impl Viewer {
     }
 
     fn open_dialog(&mut self) {
-        if let Some(path) = rfd::FileDialog::new().add_filter("PDF documents", &["pdf", "PDF"]).pick_file() {
-            self.open(path);
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("PDF documents and images", &[&["pdf", "PDF"], images::IMAGE_EXTENSIONS].concat())
+            .add_filter("PDF documents", &["pdf", "PDF"])
+            .add_filter("Images", images::IMAGE_EXTENSIONS);
+        let dir = self.doc.as_ref().and_then(|d| d.path.parent().map(Path::to_path_buf)).or_else(|| self.images.as_ref().and_then(|i| i.folder()));
+        if let Some(dir) = dir {
+            dialog = dialog.set_directory(dir);
         }
+        self.dialog.pick(&self.ctx, Asked::Open, dialog);
     }
 
     fn handle_replies(&mut self, ctx: &egui::Context) {
@@ -1621,6 +1981,10 @@ impl Viewer {
                     self.failed.clear();
                     self.chars.clear();
                     self.chars_requested.clear();
+                    self.ocr_text.clear();
+                    self.ocr_requested.clear();
+                    self.search.dirty = self.search.open;
+                    self.search.clear_results();
                     self.links.clear();
                     self.sidebar.clear();
                     self.sidebar.set_outline(outline, page_count, view);
@@ -1663,12 +2027,32 @@ impl Viewer {
                     self.added.push(path.clone());
                     let d = self.added.len();
                     let position = self.take_insert_position(&path);
+                    let replaced = self.replacing.iter().position(|(p, _)| *p == path).map(|i| self.replacing.remove(i).1);
                     if let Some(doc) = &mut self.doc
                         && first == doc.page_sizes.len()
                     {
                         let n = page_sizes.len();
+                        if let Some(old) = replaced {
+                            doc.page_sizes.extend(page_sizes);
+                            self.sources.extend((0..n).map(|p| (d, p)));
+                            // Each cleaned page in its old one's place.
+                            self.record(Undo::Order(self.order.clone()));
+                            for (i, key) in old.iter().enumerate().take(n) {
+                                if let Some(pos) = self.order.iter().position(|k| k == key) {
+                                    self.order[pos] = first + i;
+                                }
+                            }
+                            if self.search.query.is_some() {
+                                self.search.dirty = true;
+                            }
+                            self.back.clear();
+                            continue;
+                        }
                         doc.page_sizes.extend(page_sizes);
                         self.sources.extend((0..n).map(|p| (d, p)));
+                        if self.search.query.is_some() {
+                            self.search.dirty = true;
+                        }
                         if let Some(pos) = position
                             && n > 0
                         {
@@ -1685,6 +2069,7 @@ impl Viewer {
                     // Keep document numbers in step with the workers.
                     self.added.push(path.clone());
                     self.take_insert_position(&path);
+                    self.replacing.retain(|(p, _)| *p != path);
                     self.error = Some(format!("Could not insert {}: {e}", path.display()));
                 }
                 Reply::PageFailed { page, error } => {
@@ -1696,7 +2081,57 @@ impl Viewer {
                         self.select_all_pending = None;
                         self.selection = Some(Selection { page, anchor: 0, focus: chars.len() });
                     }
+                    // A page without text of its own (a scan): its images' text.
+                    let chars = if chars.iter().any(|c| c.rect.is_some()) {
+                        chars
+                    } else if let Some(read) = self.ocr_text.get(&page).filter(|r| !r.is_empty()) {
+                        read.clone()
+                    } else {
+                        if worker::ocr_available() && self.ocr_requested.insert(page) {
+                            self.pool.want_ocr(page);
+                        }
+                        chars
+                    };
                     self.chars.insert(page, chars);
+                }
+                Reply::Found { page, id, matches, images } => {
+                    if id == self.search.id {
+                        self.search.searched += 1;
+                        self.search.searched_keys.insert(page);
+                        if !matches.is_empty() {
+                            self.search.in_text.insert(page, matches);
+                        }
+                        if images && !self.search.skip_images && worker::ocr_available() {
+                            if let Some(read) = self.ocr_text.get(&page).cloned() {
+                                self.found_in_images(page, &read);
+                            } else {
+                                self.search.reading.insert(page);
+                                if self.ocr_requested.insert(page) {
+                                    self.pool.want_ocr(page);
+                                }
+                            }
+                        }
+                        self.seek_match();
+                    }
+                }
+                Reply::Ocr { page, chars } => {
+                    self.ocr_text.insert(page, chars.clone());
+                    if self.search.reading.remove(&page) {
+                        self.found_in_images(page, &chars);
+                        self.seek_match();
+                    }
+                    // Selectable on a page without text of its own.
+                    if !chars.is_empty()
+                        && self.chars.get(&page).is_some_and(|c| !c.iter().any(|c| c.rect.is_some()))
+                    {
+                        self.chars.insert(page, chars);
+                    }
+                }
+                Reply::OcrFailed { page, error } => {
+                    self.search.reading.remove(&page);
+                    if self.search.query.is_some() {
+                        self.search.ocr_error = Some(error);
+                    }
                 }
             }
         }
@@ -1798,7 +2233,16 @@ impl Viewer {
     fn handle_keys(&mut self, ctx: &egui::Context) {
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
         // Saving works while typing in a form field too.
-        if self.doc.is_some() {
+        if let Some(images) = self.images.as_ref().filter(|i| i.insert_at.is_none()) {
+            let save = images.is_modified() || images.saved_to.is_none();
+            if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
+                self.save_images(true, After::Nothing);
+            }
+            if pressed(Modifiers::COMMAND, Key::S) && save {
+                self.save_images(false, After::Nothing);
+            }
+        }
+        if self.doc.is_some() && self.images.is_none() {
             if pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::S) {
                 self.save_as_dialog(After::Nothing);
             }
@@ -1806,11 +2250,27 @@ impl Viewer {
                 self.save_in_place(After::Nothing);
             }
         }
+        if self.doc.is_some() && self.images.is_none() {
+            if pressed(Modifiers::COMMAND, Key::F) {
+                self.search.show();
+            }
+            // (Shift first: F3 would also match Shift+F3.)
+            if pressed(Modifiers::SHIFT, Key::F3) || pressed(Modifiers::COMMAND | Modifiers::SHIFT, Key::G) {
+                self.step_match(false);
+            }
+            if pressed(Modifiers::NONE, Key::F3) || pressed(Modifiers::COMMAND, Key::G) {
+                self.step_match(true);
+            }
+        }
         if ctx.egui_wants_keyboard_input() {
             return; // typing in the page box or a form field
         }
         if pressed(Modifiers::COMMAND, Key::O) {
             self.open_dialog();
+        }
+        if let Some(images) = &mut self.images {
+            images.keys(ctx);
+            return;
         }
         if self.doc.is_none() {
             return;
@@ -1980,6 +2440,110 @@ impl Viewer {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Search
+    // ------------------------------------------------------------------
+
+    /// Searches every page for the bar's phrase, from the current page on
+    /// (so nearby results come first).
+    fn start_search(&mut self) {
+        self.search.dirty = false;
+        self.search.id += 1;
+        self.search.clear_results();
+        let query = k_pdf::search::Query::new(&self.search.text, self.search.match_case, self.search.whole_words);
+        self.search.query = query.clone();
+        self.search.seek_from = Some(self.current_page);
+        // Images queued to be read for an earlier search aren't needed now
+        // (the visible pages' own are kept).
+        let near: HashSet<usize> =
+            self.order.iter().copied().skip(self.current_page.saturating_sub(1)).take(4).collect();
+        self.pool.cancel_ocr(&near);
+        let ocr_text = &self.ocr_text;
+        self.ocr_requested.retain(|k| near.contains(k) || ocr_text.contains_key(k));
+        // (Edits clear the queue: ask again for the ones still unread.)
+        for &k in &near {
+            if self.ocr_requested.contains(&k) && !self.ocr_text.contains_key(&k) {
+                self.pool.want_ocr(k);
+            }
+        }
+        let n = self.order.len();
+        let keys: Vec<usize> = (0..n).map(|i| self.order[(self.current_page + i) % n.max(1)]).collect();
+        self.search.total = if query.is_some() { keys.len() } else { 0 };
+        self.pool.search(self.search.id, query, &keys);
+    }
+
+    fn close_search(&mut self) {
+        self.search.open = false;
+        self.search.query = None;
+        self.search.clear_results();
+        self.search.id += 1;
+        self.pool.search(self.search.id, None, &[]);
+        let near: HashSet<usize> =
+            self.order.iter().copied().skip(self.current_page.saturating_sub(1)).take(4).collect();
+        self.pool.cancel_ocr(&near);
+        let ocr_text = &self.ocr_text;
+        self.ocr_requested.retain(|k| near.contains(k) || ocr_text.contains_key(k));
+    }
+
+    /// Matches the phrase in text read from a page's images.
+    fn found_in_images(&mut self, page: usize, read: &[k_pdf::TextChar]) {
+        if let Some(query) = &self.search.query {
+            let found = query.find_approximately(read);
+            if !found.is_empty() {
+                self.search.in_images.insert(page, found);
+            }
+        }
+    }
+
+    /// Until a match has been shown: shows the first one from where the
+    /// search started, once the pages up to it have been searched.
+    fn seek_match(&mut self) {
+        let Some(from) = self.search.seek_from else { return };
+        if let Some(found) = self.search.step(&self.order, true, from) {
+            // Only once nothing nearer can still turn up: every page from
+            // `from` to it searched (several are searched at once, so
+            // replies come a little out of order). Text in images may still
+            // add nearer matches; that's fine.
+            let target = self.order.iter().position(|&k| k == found.0).unwrap_or(from);
+            let n = self.order.len().max(1);
+            let span = (target + n - from) % n;
+            if !(0..=span).all(|i| self.search.searched_keys.contains(&self.order[(from + i) % n])) {
+                return;
+            }
+            self.search.seek_from = None;
+            self.search.current = Some(found);
+            self.show_match(found);
+        }
+    }
+
+    fn step_match(&mut self, forward: bool) {
+        if !self.search.open {
+            self.search.show();
+            return;
+        }
+        if let Some(found) = self.search.step(&self.order, forward, self.current_page) {
+            self.search.seek_from = None;
+            self.search.current = Some(found);
+            self.show_match(found);
+        }
+    }
+
+    /// Scrolls so the match is in view (a third of the way down), unless
+    /// it already is.
+    fn show_match(&mut self, (key, index): (usize, usize)) {
+        let Some(&(m, _)) = self.search.on_page(key).get(index) else { return };
+        let Some(r) = m.rects.first().copied() else { return };
+        let Some(position) = self.order.iter().position(|&k| k == key) else { return };
+        let (tops, _) = self.layout();
+        let offset = self.pending_offset.unwrap_or(self.last_offset);
+        let (top, bottom) = (tops[position] + r[1] * self.zoom, tops[position] + r[3] * self.zoom);
+        let visible = top >= offset.y + 8.0 && bottom <= offset.y + self.viewport_size.y - 70.0;
+        if !visible {
+            let spot = r[1] - (self.viewport_size.y / 3.0 - 2.0 * MARGIN) / self.zoom;
+            self.go_to(position, Some(spot));
+        }
+    }
+
     fn request_chars(&mut self, page: usize) {
         if !self.chars.contains_key(&page) && self.chars_requested.insert(page) {
             self.pool.want_chars(page);
@@ -1998,7 +2562,7 @@ impl Viewer {
         let bar = ui.max_rect();
         titlebar::drag_area(ui, bar);
         // The fullest layout that fit when last measured.
-        let more = if self.doc.is_some() { 38.0 } else { 0.0 };
+        let more = if self.doc.is_some() || self.images.is_some() { 38.0 } else { 0.0 };
         let split = bar.right() - titlebar::BUTTONS_WIDTH - more;
         let controls = Rect::from_min_max(bar.min, Pos2::new(split - 8.0, bar.bottom()));
         let available = controls.width();
@@ -2010,7 +2574,10 @@ impl Viewer {
             |ui| {
                 ui.add_space(4.0);
                 titlebar::window_buttons(ui);
-                if self.doc.is_some() {
+                if self.images.is_some() {
+                    ui.add_space(4.0);
+                    self.images_menu(ui);
+                } else if self.doc.is_some() {
                     ui.add_space(4.0);
                     self.more_menu(ui, level);
                 }
@@ -2028,11 +2595,19 @@ impl Viewer {
                 used = ui.cursor().min.x - controls.left();
                 // The file name, centered in whatever room is left.
                 let free = Rect::from_min_max(Pos2::new(ui.cursor().min.x + 12.0, bar.top()), controls.max);
-                if let Some(doc) = &self.doc
+                let name = match (&self.doc, &self.images) {
+                    (Some(doc), Some(images)) => {
+                        let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        Some(if images.cleaning { format!("Cleaning up {name}") } else { format!("Adding images to {name}") })
+                    }
+                    (Some(doc), None) => Some(doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                    (None, Some(images)) => Some(images.title()),
+                    (None, None) => None,
+                };
+                if let Some(name) = name
                     && free.width() > 60.0
                 {
                     let p = theme::palette(ui);
-                    let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let mut job = egui::text::LayoutJob::default();
                     if self.is_modified() {
                         // Unsaved changes.
@@ -2064,6 +2639,87 @@ impl Viewer {
             .clicked()
         {
             self.open_dialog();
+        }
+        if let Some(images) = self.images.as_ref().filter(|i| i.cleaning) {
+            // Cleaning up: Apply or Cancel instead of saving.
+            let (busy, any) = (images.is_saving(), images.has_changes());
+            if ui.add_enabled(!busy, egui::Button::new("Cancel")).on_hover_text("Back to the document, unchanged").clicked() {
+                self.cancel_inserting();
+                return;
+            }
+            if ui.add_enabled_ui(!busy && any, |ui| theme::primary_button(ui, "Apply")).inner
+                .on_hover_text("Put the cleaned-up pages in the document, in place of the old ones (Ctrl+Z undoes it); pages left As is stay as they were")
+                .clicked()
+            {
+                self.finish_cleaning();
+                return;
+            }
+        }
+        if let Some(images) = self.images.as_ref().filter(|i| i.insert_at.is_some()) {
+            // Images to insert: Insert or Cancel instead of saving.
+            let (busy, n) = (images.is_saving(), images.page_count());
+            if ui.add_enabled(!busy, egui::Button::new("Cancel")).on_hover_text("Back to the document without the images").clicked() {
+                self.cancel_inserting();
+                return;
+            }
+            let label = format!("Insert {n} page{}", if n == 1 { "" } else { "s" });
+            if ui.add_enabled_ui(!busy && n > 0, |ui| theme::primary_button(ui, &label)).inner
+                .on_hover_text("Make the pages as they look here and add them to the document")
+                .clicked()
+            {
+                self.finish_inserting();
+            }
+        }
+        if let Some(images) = self.images.as_mut().filter(|i| i.insert_at.is_some() || i.cleaning) {
+            if level < 2 {
+                divider(ui);
+            }
+            images.toolbar(ui, labels, level < 2);
+            divider(ui);
+            if icons::button(ui, Icon::Sidebar, None, self.show_sidebar, true)
+                .on_hover_text("Show or hide the page thumbnails")
+                .clicked()
+            {
+                self.show_sidebar = !self.show_sidebar;
+            }
+            return;
+        }
+        if let Some(images) = &mut self.images {
+            let can_save = (images.is_modified() || images.saved_to.is_none()) && !images.is_saving() && images.page_count() > 0;
+            if icons::button(ui, Icon::Save, labels.then_some("Save PDF"), false, can_save)
+                .on_hover_text("Save the pages as one PDF (Ctrl+S)")
+                .clicked()
+            {
+                self.save_images(false, After::Nothing);
+            }
+            // Once saved: the PDF itself, in the viewer.
+            if let Some(images) = &self.images
+                && let Some(path) = images.saved_to.clone()
+                && !images.is_saving()
+            {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                if icons::button(ui, Icon::Document, labels.then_some("Open PDF"), false, true)
+                    .on_hover_text(format!("Open {name} to read it as a PDF (zoom, select text, search…)"))
+                    .clicked()
+                {
+                    self.open(path);
+                    return;
+                }
+            }
+            if let Some(images) = &mut self.images {
+                if level < 2 {
+                    divider(ui);
+                }
+                images.toolbar(ui, labels, level < 2);
+            }
+            divider(ui);
+            if icons::button(ui, Icon::Sidebar, None, self.show_sidebar, true)
+                .on_hover_text("Show or hide the page thumbnails")
+                .clicked()
+            {
+                self.show_sidebar = !self.show_sidebar;
+            }
+            return;
         }
         if self.doc.is_none() {
             return;
@@ -2121,23 +2777,43 @@ impl Viewer {
             }
         });
         divider(ui);
+        // Viewing aids (they don't change the document), then the tools
+        // that open a view of their own; presenting, which takes over the
+        // screen, last.
+        if icons::button(ui, Icon::Search, None, self.search.open, true)
+            .on_hover_text("Find words in the document, also in scanned pages and pictures (Ctrl+F)")
+            .clicked()
+        {
+            if self.search.open {
+                self.close_search();
+            } else {
+                self.search.show();
+            }
+        }
         if icons::button(ui, Icon::Sidebar, None, self.show_sidebar, true)
             .on_hover_text("Show or hide the page thumbnails")
             .clicked()
         {
             self.show_sidebar = !self.show_sidebar;
         }
-        if icons::button(ui, Icon::Present, None, false, true)
-            .on_hover_text("Present: pages as full-screen slides (F5 from the start, Shift+F5 from this page)")
-            .clicked()
-        {
-            self.start_presentation(ui.ctx(), false);
-        }
         if icons::button(ui, Icon::Moon, None, self.dark_pages, true)
             .on_hover_text("Dark pages for reading: light text on a dark page, colors kept (Ctrl+Shift+D)")
             .clicked()
         {
             self.set_dark_pages(!self.dark_pages);
+        }
+        divider(ui);
+        if icons::button(ui, Icon::Sparkle, None, false, true)
+            .on_hover_text("Clean up scanned pages: make scans and photographed or handwritten pages clear and crisp. Pick the pages; the others stay as they are.")
+            .clicked()
+        {
+            self.clean_up_pages();
+        }
+        if icons::button(ui, Icon::Present, None, false, true)
+            .on_hover_text("Present: pages as full-screen slides (F5 from the start, Shift+F5 from this page)")
+            .clicked()
+        {
+            self.start_presentation(ui.ctx(), false);
         }
     }
 
@@ -2170,6 +2846,18 @@ impl Viewer {
             if ui.button("Delete pages…").on_hover_text("Delete a page, or a list or range of pages").clicked() {
                 ui.close();
                 self.delete_dialog = Some(((self.current_page + 1).to_string(), None));
+            }
+            if ui.button("Insert pages or images…").on_hover_text("Insert a PDF's pages, or images as pages, after this page").clicked() {
+                ui.close();
+                self.insert_file_dialog(self.current_page + 1);
+            }
+            if ui
+                .button("Clean up scanned pages…")
+                .on_hover_text("Make scanned or photographed pages (handwriting too) clear and crisp: white paper, sharp ink, straightened, in color, gray or black and white. Pick the pages to clean up; the others stay as they are.")
+                .clicked()
+            {
+                ui.close();
+                self.clean_up_pages();
             }
             ui.separator();
             if ui.add(egui::Button::new("Present").shortcut_text("F5")).clicked() {
@@ -2209,6 +2897,43 @@ impl Viewer {
             if ui.checkbox(&mut dark, "Dark pages for reading").on_hover_text("Ctrl+Shift+D").changed() {
                 self.set_dark_pages(dark);
             }
+            let before = self.theme;
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.theme, egui::ThemePreference::System, "System");
+                ui.selectable_value(&mut self.theme, egui::ThemePreference::Light, "Light");
+                ui.selectable_value(&mut self.theme, egui::ThemePreference::Dark, "Dark");
+            });
+            if self.theme != before {
+                ui.ctx().set_theme(self.theme);
+            }
+        });
+    }
+
+    /// The "⋯" menu for images: saving elsewhere, undo and redo, the
+    /// appearance.
+    fn images_menu(&mut self, ui: &mut egui::Ui) {
+        let response = icons::button(ui, Icon::More, None, false, true).on_hover_text("More");
+        egui::Popup::menu(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(200.0);
+            let Some(images) = &mut self.images else { return };
+            let busy = images.is_saving() || images.page_count() == 0;
+            if images.insert_at.is_none()
+                && ui.add_enabled(!busy, egui::Button::new("Save PDF as…").shortcut_text("Ctrl+Shift+S")).clicked()
+            {
+                ui.close();
+                self.save_images(true, After::Nothing);
+                return;
+            }
+            if ui.add_enabled(images.can_undo(), egui::Button::new("Undo").shortcut_text("Ctrl+Z")).clicked() {
+                images.undo();
+                ui.close();
+            }
+            if ui.add_enabled(images.can_redo(), egui::Button::new("Redo").shortcut_text("Ctrl+Y")).clicked() {
+                images.redo();
+                ui.close();
+            }
+            ui.separator();
+            ui.weak("Appearance");
             let before = self.theme;
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.theme, egui::ThemePreference::System, "System");
@@ -2311,6 +3036,14 @@ impl Viewer {
                 ui.label(format!("Opening {}…", path.display()));
                 return;
             }
+            if let Some(images) = &self.images {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let n = images.page_count();
+                    ui.label(format!("{n} page{}", if n == 1 { "" } else { "s" }));
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| images.status(ui));
+                });
+                return;
+            }
             let Some(doc) = &self.doc else {
                 ui.label("No document open");
                 return;
@@ -2334,8 +3067,12 @@ impl Viewer {
     fn status_message(&self, ui: &mut egui::Ui) {
         if let Some((path, _)) = self.inserting.first() {
             ui.spinner();
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            ui.label(format!("Adding {name}…"));
+            if self.image_files.contains(path) {
+                ui.label("Adding the images…");
+            } else {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                ui.label(format!("Adding {name}…"));
+            }
         } else if let Some(saving) = &self.saving {
             ui.spinner();
             ui.label(format!("Saving {}…", saving.target.display()));
@@ -2423,9 +3160,9 @@ impl Viewer {
             ui.painter().circle_filled(r.center(), 44.0, p.accent_soft);
             icons::paint(ui.painter(), r.shrink(22.0), Icon::Document, p.accent);
             ui.add_space(20.0);
-            ui.label(egui::RichText::new("Open a PDF").size(24.0).color(p.text));
+            ui.label(egui::RichText::new("Open a PDF or images").size(24.0).color(p.text));
             ui.add_space(4.0);
-            ui.label(egui::RichText::new("Drop a file here, or press Ctrl+O").color(p.weak));
+            ui.label(egui::RichText::new("Drop files here, or press Ctrl+O").color(p.weak));
             ui.add_space(20.0);
             let open = egui::Button::new(egui::RichText::new("Choose a file…").size(15.0).color(p.on_accent))
                 .fill(p.accent)
@@ -2434,6 +3171,12 @@ impl Viewer {
             if ui.add(open).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 self.open_dialog();
             }
+            ui.add_space(14.0);
+            ui.label(
+                egui::RichText::new("Images open as pages: keep them as they are, or clean up photos of documents like a scan, then save them as one PDF.")
+                    .size(12.5)
+                    .color(p.weak),
+            );
         });
     }
 
@@ -2505,6 +3248,16 @@ impl Viewer {
                         None => (String::new(), Color32::GRAY),
                     };
                     painter.text(rect.center(), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(14.0), color);
+                }
+                // Search matches.
+                if self.search.open {
+                    for (index, (m, _)) in self.search.on_page(page).into_iter().enumerate() {
+                        let current = self.search.current == Some((page, index));
+                        for &[l, t, r, b] in &m.rects {
+                            let r = Rect::from_min_max(rect.min + Vec2::new(l, t) * zoom, rect.min + Vec2::new(r, b) * zoom);
+                            painter.rect_filled(r.expand(1.0), 2.0, if current { search::CURRENT_COLOR } else { search::MATCH_COLOR });
+                        }
+                    }
                 }
                 // Selection highlight.
                 if let (Some(sel), Some(chars)) = (self.selection, self.chars.get(&page))
@@ -2831,7 +3584,8 @@ impl eframe::App for Viewer {
     /// `--script`: the next scripted input.
     #[cfg(feature = "script")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        if self.screenshot.is_some() || self.loading.is_some() || (self.doc.is_none() && self.error.is_none()) {
+        let images = self.images.as_ref().is_some_and(|i| !i.busy());
+        if self.screenshot.is_some() || self.loading.is_some() || (self.doc.is_none() && self.error.is_none() && !images) {
             ctx.request_repaint();
             return; // waiting for a screenshot, or for the document
         }
@@ -2855,6 +3609,8 @@ impl eframe::App for Viewer {
         self.frame += 1;
         self.handle_replies(&ctx);
         self.poll_save(&ctx);
+        self.poll_images(&ctx);
+        self.poll_dialog();
         // Closing with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested()) && self.is_modified() && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -2869,9 +3625,15 @@ impl eframe::App for Viewer {
         }
         titlebar::resize_edges(&ctx);
 
-        // Files dropped onto the window.
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|f| f.path.clone())) {
-            self.open(path);
+        // Files dropped onto the window: a PDF is opened; images are added
+        // to the images shown, or else opened.
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        match &mut self.images {
+            Some(images) if !dropped.is_empty() && dropped.iter().all(|p| images::is_image(p) || images::is_pdf(p)) => {
+                images.add(dropped, None)
+            }
+            _ if !dropped.is_empty() => self.open_files(dropped),
+            _ => {}
         }
         self.handle_keys(&ctx);
 
@@ -2885,6 +3647,16 @@ impl eframe::App for Viewer {
             .frame(egui::Frame::new().fill(palette.panel).inner_margin(egui::Margin::symmetric(12, 0)))
             .show(ui, |ui| self.status_bar(ui));
         if self.show_sidebar
+            && let Some(images) = &mut self.images
+        {
+            egui::Panel::left("image-sidebar")
+                .resizable(true)
+                .default_size(sidebar::DEFAULT_WIDTH)
+                .size_range(100.0..=400.0)
+                .show(ui, |ui| images.sidebar(ui));
+        }
+        if self.show_sidebar
+            && self.images.is_none()
             && let Some(doc) = &self.doc
         {
             let sizes = doc.page_sizes.clone();
@@ -2938,23 +3710,27 @@ impl eframe::App for Viewer {
         egui::CentralPanel::no_frame()
             .frame(egui::Frame::NONE.fill(palette.canvas))
             .show(ui, |ui| {
-                if self.doc.is_some() {
+                if let Some(images) = &mut self.images {
+                    images.view(ui);
+                } else if self.doc.is_some() {
                     anchors = self.pages(ui);
                 } else {
                     self.welcome(ui);
                 }
             });
-        if self.doc.is_some() && !self.crop_mode && !self.redact_mode && !self.edit_mode {
+        // The document's tools, unless images to insert are shown instead.
+        let pdf = self.doc.is_some() && self.images.is_none();
+        if pdf && !self.crop_mode && !self.redact_mode && !self.edit_mode {
             self.comment_overlays(&ctx, &anchors);
         }
         if self.crop_mode
-            && self.doc.is_some()
+            && pdf
             && let Some(action) = self.crop.panel(&ctx, self.view_rect, self.order.len())
         {
             self.handle_crop_action(action);
         }
         if self.rotate_mode
-            && self.doc.is_some()
+            && pdf
             && let Some(action) = self.rotate.panel(&ctx, self.view_rect, self.current_page, self.order.len())
         {
             match action {
@@ -2963,13 +3739,23 @@ impl eframe::App for Viewer {
             }
         }
         if self.redact_mode
-            && self.doc.is_some()
+            && pdf
             && let Some(action) = self.redact.panel(&ctx, self.view_rect)
         {
             self.handle_redact_action(action);
         }
-        if self.doc.is_some() {
+        if pdf {
             self.page_pill(&ctx);
+            if self.search.dirty {
+                self.start_search();
+            }
+            match self.search.bar(&ctx, self.view_rect, &self.order, worker::ocr_available()) {
+                Some(search::Action::Changed) => self.start_search(),
+                Some(search::Action::Next) => self.step_match(true),
+                Some(search::Action::Previous) => self.step_match(false),
+                Some(search::Action::Close) => self.close_search(),
+                None => {}
+            }
         }
         drop_highlight(&ctx);
         self.poll_print();
@@ -2991,6 +3777,9 @@ impl eframe::App for Viewer {
         }
         self.delete_dialog(&ctx);
         self.info_window(&ctx);
+        if let Some(at) = self.images.as_mut().and_then(|i| i.take_add_request()) {
+            self.add_images_dialog(at);
+        }
         self.unsaved_prompt(&ctx);
         self.take_screenshot(&ctx);
     }
@@ -3023,9 +3812,12 @@ impl Viewer {
             }
             return;
         }
-        let done_loading = self.loading.is_none() && (self.doc.is_some() || self.error.is_some());
+        // Started with images: once they are read and shown.
+        let images = self.images.as_ref().is_some_and(|i| !i.busy());
+        let done_loading = self.loading.is_none() && (self.doc.is_some() || self.error.is_some()) || images;
         let rendered = self.last_want.0.is_empty() && !self.textures.is_empty() && !self.sidebar.pending()
-            || self.error.is_some();
+            || self.error.is_some()
+            || images;
         if done_loading && rendered && !shot.requested {
             if shot.settle > 0 {
                 shot.settle -= 1;

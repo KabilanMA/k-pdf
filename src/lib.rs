@@ -28,9 +28,14 @@ mod layout;
 mod links;
 mod font;
 mod object;
+#[cfg(feature = "ocr")]
+pub mod ocr;
 mod parser;
+#[cfg(feature = "compress")]
+pub mod scan;
 #[cfg(feature = "render")]
 mod render;
+pub mod search;
 mod std14;
 mod text;
 mod writer;

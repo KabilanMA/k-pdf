@@ -13,6 +13,9 @@ pub enum Error {
     Filter(String),
     /// The document is encrypted and decryption is not implemented yet.
     Encrypted,
+    /// A photo could not be read (see `scan`); the message is a sentence
+    /// fragment such as "not a JPEG or PNG image".
+    Image(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -31,6 +34,7 @@ impl fmt::Display for Error {
             Error::Object(msg) => write!(f, "object error: {msg}"),
             Error::Filter(msg) => write!(f, "filter error: {msg}"),
             Error::Encrypted => write!(f, "document is encrypted (decryption not supported yet)"),
+            Error::Image(msg) => f.write_str(msg),
         }
     }
 }

@@ -2,7 +2,7 @@
 name = "k-pdf-viewer"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "k-pdf: a fast, low-memory desktop PDF viewer and editor"
 
@@ -16,7 +16,7 @@ path = "src/main.rs"
 script = []
 
 [dependencies]
-k-pdf = { path = "..", features = ["render", "compress"] }
+k-pdf = { path = "..", features = ["render", "compress", "ocr"] }
 # OpenGL (glow) backend instead of wgpu: smaller binary, lower memory.
 eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.17.2"

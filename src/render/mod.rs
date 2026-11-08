@@ -45,6 +45,10 @@ pub struct RenderedPage {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u8>,
+    /// Where images were drawn: `[left, top, right, bottom]` in pixels,
+    /// within the page (for reading text in images, see `ocr`). Images
+    /// that couldn't be decoded are left out.
+    pub images: Vec<[f32; 4]>,
 }
 
 /// Renders pages of one document. Keeps fonts loaded between pages, so
@@ -59,6 +63,8 @@ pub struct Renderer<'d> {
     /// rectangles) to leave as they are on the page being rendered.
     dark_pages: bool,
     photos: Vec<dark::Keep>,
+    /// Images drawn on the page being rendered (see `RenderedPage::images`).
+    images: Vec<[f32; 4]>,
 }
 
 impl<'d> Renderer<'d> {
@@ -71,6 +77,7 @@ impl<'d> Renderer<'d> {
             hide_form_fields: false,
             dark_pages: false,
             photos: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -112,7 +119,8 @@ impl<'d> Renderer<'d> {
             dark::darken(&mut pixels, pw, &self.photos);
         }
         self.photos.clear();
-        Ok(RenderedPage { width: pw, height: ph, pixels })
+        let images = std::mem::take(&mut self.images);
+        Ok(RenderedPage { width: pw, height: ph, pixels, images })
     }
 
     // ------------------------------------------------------------------
@@ -727,6 +735,9 @@ impl<'d> Renderer<'d> {
         let ts = to_ts(&ctm);
         match image::decode(doc, stream, resources, paint, target) {
             Some(img) => {
+                if let Some(r) = device_bounds(canvas, &ctm) {
+                    self.images.push(r.map(|v| v as f32));
+                }
                 if self.dark_pages && !is_mask && dark::looks_like_photo(img.data(), img.width(), img.height()) {
                     self.keep_photo(canvas, &ctm);
                 }
@@ -752,13 +763,7 @@ impl<'d> Renderer<'d> {
     /// Leaves the area a photo is drawn in (the unit square under `ctm`,
     /// within the clip) as it is on a dark page.
     fn keep_photo(&mut self, canvas: &Pixmap, ctm: &Matrix) {
-        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
-            .map(|(x, y)| (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]));
-        let (x0, x1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
-        let (y0, y1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
-        let clamp = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
-        let keep = [clamp(x0, canvas.width()), clamp(y0, canvas.height()), clamp(x1, canvas.width()), clamp(y1, canvas.height())];
-        if keep[2] > keep[0] && keep[3] > keep[1] {
+        if let Some(keep) = device_bounds(canvas, ctm) {
             self.photos.push(keep);
         }
     }
@@ -1311,6 +1316,18 @@ fn blend_mode(name: &[u8]) -> BlendMode {
         b"Luminosity" => BlendMode::Luminosity,
         _ => BlendMode::SourceOver,
     }
+}
+
+/// The pixels covered by the unit square under `ctm` (an image), within
+/// the canvas: `[left, top, right, bottom]`, or `None` if it's off the page.
+fn device_bounds(canvas: &Pixmap, ctm: &Matrix) -> Option<[u32; 4]> {
+    let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        .map(|(x, y)| (x * ctm[0] + y * ctm[2] + ctm[4], x * ctm[1] + y * ctm[3] + ctm[5]));
+    let (x0, x1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.0), b.max(c.0)));
+    let (y0, y1) = corners.iter().fold((f64::MAX, f64::MIN), |(a, b), c| (a.min(c.1), b.max(c.1)));
+    let clamp = |v: f64, max: u32| v.round().clamp(0.0, max as f64) as u32;
+    let r = [clamp(x0, canvas.width()), clamp(y0, canvas.height()), clamp(x1, canvas.width()), clamp(y1, canvas.height())];
+    (r[2] > r[0] && r[3] > r[1]).then_some(r)
 }
 
 /// Reads `BI <dict> ID <data> EI`; the parser is positioned after `BI`.

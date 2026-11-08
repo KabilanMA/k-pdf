@@ -2,7 +2,7 @@
 name = "k-pdf"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "A small, low-memory PDF library, with a command-line tool (k-pdf-cli)"
 # The `k-pdf` program is the desktop application (in viewer/); the
@@ -28,16 +28,27 @@ mozjpeg-sys = { version = "2.2.3", optional = true, default-features = false, fe
 # Rendering (feature "render")
 fontdb = { version = "0.24.0", optional = true, default-features = false, features = ["fs", "memmap", "fontconfig"] }
 jpeg-decoder = { version = "0.3.2", optional = true, default-features = false }
+# WebP images (feature "compress", for making pages of images): pure Rust.
+image-webp = { version = "0.2.4", optional = true }
 tiny-skia = { version = "0.12.0", optional = true }
 ttf-parser = { version = "0.25.1", optional = true }
+# Reading text in images (feature "ocr"): the ocrs engine and the rten
+# runtime for its neural networks, pure Rust. ocrs 0.12 / rten 0.24 build
+# with Rust 1.89 (later versions need 1.94). The networks' files are
+# shipped next to the program (see src/ocr.rs).
+ocrs = { version = "0.12.2", optional = true, default-features = false, features = ["onnx"] }
+rten = { version = "0.24.0", optional = true, default-features = false, features = ["onnx_format"] }
+rten-imageproc = { version = "0.24.0", optional = true }
 
 [features]
-default = ["render", "compress"]
+default = ["render", "compress", "ocr"]
 # Page rasterization. Disable with `--no-default-features` for a reader-only build.
 render = ["dep:tiny-skia", "dep:ttf-parser", "dep:jpeg-decoder", "dep:fontdb"]
 # Lossless file compression (`compress`); JPEG results are checked with
 # jpeg-decoder.
-compress = ["dep:brotli", "dep:libdeflater", "dep:mozjpeg-sys", "dep:jpeg-decoder"]
+compress = ["dep:brotli", "dep:libdeflater", "dep:mozjpeg-sys", "dep:jpeg-decoder", "dep:image-webp"]
+# Reading text in images (`ocr`, `k-pdf-cli ocr`, searching images).
+ocr = ["render", "dep:ocrs", "dep:rten", "dep:rten-imageproc"]
 
 [profile.release]
 lto = "thin"

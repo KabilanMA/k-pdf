@@ -14,9 +14,10 @@
 
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use eframe::egui;
+use k_pdf::search::{Match, Query};
 use k_pdf::{Document, Link, Renderer, TextChar, TextExtractor};
 
 /// Largest texture side we ask for; beyond this pages are upscaled.
@@ -28,6 +29,27 @@ enum Job {
     Chars { page: usize },
     /// A small rendering for the page sidebar.
     Thumb { page: usize, scale: f32 },
+    /// Searching a page's text for the current query (`id`).
+    Search { page: usize, id: u64 },
+    /// Reading the text in a page's images (slow: one at a time).
+    Ocr { page: usize },
+}
+
+impl Job {
+    /// Jobs run in this order: what's on screen first, reading images last.
+    fn rank(&self) -> u8 {
+        match self {
+            Job::Render { .. } => 0,
+            Job::Chars { .. } => 1,
+            Job::Thumb { .. } => 2,
+            Job::Search { .. } => 3,
+            Job::Ocr { .. } => 4,
+        }
+    }
+}
+
+fn sort_jobs(jobs: &mut [Job]) {
+    jobs.sort_by_key(Job::rank);
 }
 
 pub struct DocInfo {
@@ -55,6 +77,12 @@ pub enum Reply {
     /// A page's text (in reading order) and links.
     Chars { page: usize, chars: Arc<Vec<TextChar>>, links: Arc<Vec<Link>> },
     Thumb { page: usize, dark: bool, image: egui::ColorImage },
+    /// Where the search `id` found its phrase on a page, and whether the
+    /// page has images (whose text can be read with [`Pool::want_ocr`]).
+    Found { page: usize, id: u64, matches: Vec<Match>, images: bool },
+    /// The text read in a page's images (empty if it has none).
+    Ocr { page: usize, chars: Arc<Vec<TextChar>> },
+    OcrFailed { page: usize, error: String },
     /// A document added with [`Pool::add_document`] is open; its pages have
     /// keys `first..first + page_sizes.len()`.
     Added { path: PathBuf, first: usize, page_sizes: Vec<egui::Vec2> },
@@ -73,6 +101,8 @@ struct State {
     overlay_version: u64,
     /// Render pages dark for reading.
     dark: bool,
+    /// The phrase being searched for, and its search's id.
+    search: Option<(u64, Arc<Query>)>,
     /// Pending jobs, most important first.
     jobs: Vec<Job>,
     /// Jobs a thread is working on right now, and whether it renders them
@@ -110,6 +140,7 @@ impl Pool {
                 overlay: None,
                 overlay_version: 0,
                 dark: false,
+                search: None,
                 jobs: Vec::new(),
                 running: Vec::new(),
                 closed: false,
@@ -137,12 +168,13 @@ impl Pool {
         st.added.clear();
         st.overlay = None;
         st.overlay_version += 1;
+        st.search = None;
         st.jobs.clear();
         self.shared.wake.notify_all();
     }
 
-    /// Replaces the queued page renders. Queued text and thumbnail
-    /// requests are kept, after them (the main view comes first).
+    /// Replaces the queued page renders. Other queued jobs are kept, after
+    /// them (the main view comes first).
     pub fn want_pages(&self, pages: &[usize], scale: f32) {
         let mut st = self.shared.state.lock().unwrap();
         let mut jobs: Vec<Job> = pages
@@ -150,10 +182,41 @@ impl Pool {
             .map(|&page| Job::Render { page, scale })
             .filter(|j| !st.is_running(j))
             .collect();
-        jobs.extend(st.jobs.iter().filter(|j| matches!(j, Job::Chars { .. })));
-        jobs.extend(st.jobs.iter().filter(|j| matches!(j, Job::Thumb { .. })));
+        jobs.extend(st.jobs.iter().filter(|j| !matches!(j, Job::Render { .. })));
+        sort_jobs(&mut jobs);
         st.jobs = jobs;
         self.shared.wake.notify_all();
+    }
+
+    /// Searches `pages` (keys, in the order given) for `query`, answered
+    /// with [`Reply::Found`] tagged `id`. `None` stops searching.
+    pub fn search(&self, id: u64, query: Option<Query>, pages: &[usize]) {
+        let mut st = self.shared.state.lock().unwrap();
+        st.jobs.retain(|j| !matches!(j, Job::Search { .. }));
+        st.search = query.map(|q| (id, Arc::new(q)));
+        if st.search.is_some() {
+            st.jobs.extend(pages.iter().map(|&page| Job::Search { page, id }));
+        }
+        sort_jobs(&mut st.jobs);
+        self.shared.wake.notify_all();
+    }
+
+    /// Reads the text in a page's images ([`Reply::Ocr`]). Pages are read
+    /// one at a time, after everything else.
+    pub fn want_ocr(&self, page: usize) {
+        let mut st = self.shared.state.lock().unwrap();
+        let job = Job::Ocr { page };
+        if !st.jobs.contains(&job) && !st.running.iter().any(|(j, _)| *j == job) {
+            st.jobs.push(job);
+            sort_jobs(&mut st.jobs);
+            self.shared.wake.notify_all();
+        }
+    }
+
+    /// Drops queued image reading, except for `keep`.
+    pub fn cancel_ocr(&self, keep: &std::collections::HashSet<usize>) {
+        let mut st = self.shared.state.lock().unwrap();
+        st.jobs.retain(|j| !matches!(j, Job::Ocr { page } if !keep.contains(page)));
     }
 
     /// Replaces the queued thumbnail renders (`(page, scale)` pairs). They
@@ -167,6 +230,7 @@ impl Pool {
             .filter(|j| !st.is_running(j))
             .collect();
         st.jobs.extend(new);
+        sort_jobs(&mut st.jobs);
         self.shared.wake.notify_all();
     }
 
@@ -187,7 +251,8 @@ impl Pool {
         let mut st = self.shared.state.lock().unwrap();
         if st.dark != dark {
             st.dark = dark;
-            st.jobs.clear();
+            // Text, searching and reading images don't depend on it.
+            st.jobs.retain(|j| matches!(j, Job::Chars { .. } | Job::Search { .. } | Job::Ocr { .. }));
         }
         self.shared.wake.notify_all();
     }
@@ -320,7 +385,7 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                     let mut st = shared.state.lock().unwrap();
                     while !st.closed
                         && st.doc_id == id
-                        && st.jobs.is_empty()
+                        && next_job(&st).is_none()
                         && st.added.len() + 1 == docs.len()
                         && st.overlay_version == overlay_version
                     {
@@ -335,12 +400,19 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                     if st.added.len() + 1 != docs.len() || st.overlay_version != overlay_version {
                         break; // another document was added, or edits changed
                     }
-                    let job = st.jobs.remove(0);
+                    let Some(i) = next_job(&st) else { continue };
+                    let job = st.jobs.remove(i);
+                    // A search that was replaced meanwhile.
+                    if let Job::Search { id: wanted, .. } = job
+                        && st.search.as_ref().is_none_or(|(current, _)| *current != wanted)
+                    {
+                        continue;
+                    }
                     let dark = st.dark;
                     st.running.push((job, dark));
-                    (job, dark)
+                    (job, dark, st.search.as_ref().map(|(_, q)| q.clone()))
                 };
-                let (job, dark) = job;
+                let (job, dark, query) = job;
                 // Which document the page belongs to.
                 let key = job.page();
                 let d = starts.partition_point(|&s| s <= key).saturating_sub(1);
@@ -349,7 +421,7 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                         // Thumbnails keep the fields as saved in the file.
                         renderer.set_hide_form_fields(has_form && d == 0 && matches!(job, Job::Render { .. }));
                         renderer.set_dark_pages(dark);
-                        run_job(job.with_page(key - starts[d]), doc, pages, renderer, extractor, dark)
+                        run_job(job.with_page(key - starts[d]), doc, pages, renderer, extractor, dark, query.as_deref())
                             .map(|r| r.with_page_offset(starts[d]))
                     }
                     _ => None,
@@ -359,6 +431,10 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                     if let Some(i) = st.running.iter().position(|r| *r == (job, dark)) {
                         st.running.remove(i);
                     }
+                    // Another thread may be waiting to read the next page's images.
+                    if matches!(job, Job::Ocr { .. }) {
+                        shared.wake.notify_all();
+                    }
                 }
                 if let Some(r) = reply {
                     send(id, r);
@@ -366,6 +442,25 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
             }
         }
     }
+}
+
+/// The first queued job that may run now: reading images only when no
+/// other thread is (it uses several threads itself, and a lot of memory).
+fn next_job(st: &State) -> Option<usize> {
+    let reading = st.running.iter().any(|(j, _)| matches!(j, Job::Ocr { .. }));
+    st.jobs.iter().position(|j| !(reading && matches!(j, Job::Ocr { .. })))
+}
+
+/// The text-recognition engine, loaded the first time it's needed.
+fn ocr_engine() -> Result<Arc<k_pdf::ocr::Ocr>, String> {
+    static ENGINE: OnceLock<Result<Arc<k_pdf::ocr::Ocr>, String>> = OnceLock::new();
+    ENGINE.get_or_init(|| k_pdf::ocr::Ocr::find().map(Arc::new).map_err(|e| e.to_string())).clone()
+}
+
+/// Whether text in images can be read (the models are installed).
+pub fn ocr_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| k_pdf::ocr::find_models().is_some())
 }
 
 fn page_total(docs: &[Opened]) -> usize {
@@ -386,13 +481,21 @@ fn page_starts(docs: &[Opened]) -> Vec<usize> {
 impl Job {
     fn page(&self) -> usize {
         match *self {
-            Job::Render { page, .. } | Job::Chars { page } | Job::Thumb { page, .. } => page,
+            Job::Render { page, .. }
+            | Job::Chars { page }
+            | Job::Thumb { page, .. }
+            | Job::Search { page, .. }
+            | Job::Ocr { page } => page,
         }
     }
 
     fn with_page(mut self, p: usize) -> Job {
         match &mut self {
-            Job::Render { page, .. } | Job::Chars { page } | Job::Thumb { page, .. } => *page = p,
+            Job::Render { page, .. }
+            | Job::Chars { page }
+            | Job::Thumb { page, .. }
+            | Job::Search { page, .. }
+            | Job::Ocr { page } => *page = p,
         }
         self
     }
@@ -402,7 +505,12 @@ impl Reply {
     /// Turns page numbers within one document into page keys.
     fn with_page_offset(mut self, offset: usize) -> Reply {
         match &mut self {
-            Reply::Page { page, .. } | Reply::PageFailed { page, .. } | Reply::Thumb { page, .. } => *page += offset,
+            Reply::Page { page, .. }
+            | Reply::PageFailed { page, .. }
+            | Reply::Thumb { page, .. }
+            | Reply::Found { page, .. }
+            | Reply::Ocr { page, .. }
+            | Reply::OcrFailed { page, .. } => *page += offset,
             Reply::Chars { page, links, .. } => {
                 *page += offset;
                 if offset > 0 {
@@ -438,12 +546,39 @@ fn run_job(
     renderer: &mut Renderer,
     extractor: &mut TextExtractor,
     dark: bool,
+    query: Option<&Query>,
 ) -> Option<Reply> {
     // A bug on one page must not take down the thread.
     let guard = |f: &mut dyn FnMut() -> Reply| {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
     };
     match job {
+        Job::Search { page, id } => {
+            let (p, query) = (pages.get(page)?, query?);
+            guard(&mut || {
+                let chars = extractor.extract_chars(p).unwrap_or_default();
+                let matches = query.find(&k_pdf::reading_order(&chars));
+                Reply::Found { page, id, matches, images: k_pdf::ocr::page_has_images(doc, p) }
+            })
+        }
+        Job::Ocr { page } => {
+            let p = pages.get(page)?;
+            let engine = match ocr_engine() {
+                Ok(engine) => engine,
+                Err(error) => return Some(Reply::OcrFailed { page, error }),
+            };
+            let reply = guard(&mut || {
+                // Read from the page as printed, not as shown dark.
+                renderer.set_dark_pages(false);
+                let chars = extractor.extract_chars(p).unwrap_or_default();
+                match k_pdf::ocr::read_page_images(&engine, doc, renderer, p, &chars) {
+                    Ok(read) => Reply::Ocr { page, chars: Arc::new(read) },
+                    Err(e) => Reply::OcrFailed { page, error: e.to_string() },
+                }
+            });
+            k_pdf::ocr::release_memory();
+            Some(reply.unwrap_or(Reply::OcrFailed { page, error: "something went wrong".into() }))
+        }
         Job::Chars { page } => guard(&mut || {
             let chars = pages.get(page).and_then(|p| extractor.extract_chars(p).ok()).unwrap_or_default();
             // Reading order keeps selections inside a column (not across margin

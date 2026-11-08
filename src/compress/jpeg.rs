@@ -121,3 +121,56 @@ fn transcode(data: &[u8], progressive: bool) -> Option<Vec<u8>> {
     }
     out
 }
+
+/// Encodes 8-bit gray (`channels` 1) or RGB (3) pixels as a JPEG of the
+/// given quality (1–100), with optimized Huffman tables. Used for scanned
+/// pages (see `crate::scan`).
+pub(crate) fn encode(pixels: &[u8], width: u32, height: u32, channels: u8, quality: u8) -> Option<Vec<u8>> {
+    let stride = width as usize * channels as usize;
+    if width == 0 || height == 0 || !matches!(channels, 1 | 3) || pixels.len() < stride * height as usize {
+        return None;
+    }
+    let mut err: Box<jpeg_error_mgr> = Box::new(unsafe { std::mem::zeroed() });
+    let mut c: Box<jpeg_compress_struct> = Box::new(unsafe { std::mem::zeroed() });
+    let mut buffer: *mut u8 = std::ptr::null_mut();
+    let mut size: c_ulong = 0;
+
+    let result = panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        jpeg_std_error(&mut err);
+        err.error_exit = Some(error_exit);
+        err.emit_message = Some(emit_message);
+        err.output_message = Some(output_message);
+        c.common.err = &mut *err;
+        jpeg_create_compress(&mut *c);
+        jpeg_mem_dest(&mut c, &mut buffer, &mut size);
+        c.image_width = width;
+        c.image_height = height;
+        c.input_components = channels as i32;
+        c.in_color_space = if channels == 1 { J_COLOR_SPACE::JCS_GRAYSCALE } else { J_COLOR_SPACE::JCS_RGB };
+        // The libjpeg-turbo profile: MozJPEG's default trellis search is
+        // several times slower for little gain on scanned pages.
+        jpeg_c_set_int_param(&mut c, J_INT_PARAM::JINT_COMPRESS_PROFILE, JCP_FASTEST as i32);
+        jpeg_set_defaults(&mut c);
+        jpeg_set_quality(&mut c, quality.clamp(1, 100) as i32, 1);
+        c.optimize_coding = 1;
+        jpeg_start_compress(&mut c, 1);
+        while c.next_scanline < c.image_height {
+            let row = pixels[c.next_scanline as usize * stride..].as_ptr();
+            let rows = [row];
+            jpeg_write_scanlines(&mut c, rows.as_ptr(), 1);
+        }
+        jpeg_finish_compress(&mut c);
+    }));
+
+    let out = match result {
+        Ok(()) if !buffer.is_null() => Some(unsafe { std::slice::from_raw_parts(buffer, size as usize) }.to_vec()),
+        _ => None,
+    };
+    unsafe {
+        jpeg_destroy_compress(&mut c);
+        if !buffer.is_null() {
+            free(buffer.cast());
+        }
+    }
+    out
+}

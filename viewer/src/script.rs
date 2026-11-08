@@ -5,10 +5,13 @@
 //! ```text
 //! click 300 250        # left click at window point (x, y)
 //! drag 260 257 430 276 # press, move, release
+//! press 300 250        # or step by step (a shot can come in between)
+//! release 320 260
 //! move 300 250
 //! key ctrl+shift+h     # modifiers: ctrl (Cmd on macOS), shift, alt
 //! text Hello there     # typed text
 //! wait 10              # frames
+//! pause 1500           # milliseconds (for work in the background)
 //! shot out.ppm         # once everything is rendered, save the window
 //! ```
 
@@ -21,6 +24,9 @@ pub enum Step {
     Event(Event),
     Modifiers(Modifiers),
     Wait(u32),
+    /// Wall-clock milliseconds (frames can take well under a millisecond,
+    /// so `wait` is too short for background work).
+    Pause(u64),
     Shot(PathBuf),
 }
 
@@ -29,6 +35,7 @@ pub struct Script {
     pointer: Pos2,
     modifiers: Modifiers,
     wait: u32,
+    until: Option<std::time::Instant>,
 }
 
 impl Script {
@@ -63,6 +70,11 @@ impl Script {
                     add(&mut steps, Event::PointerMoved(pointer));
                     add(&mut steps, button(pointer, true));
                     add(&mut steps, button(pointer, false));
+                }
+                ("press" | "release", [x, y]) => {
+                    pointer = Pos2::new(*x, *y);
+                    add(&mut steps, Event::PointerMoved(pointer));
+                    add(&mut steps, button(pointer, op == "press"));
                 }
                 ("drag", [x0, y0, x1, y1]) => {
                     let from = Pos2::new(*x0, *y0);
@@ -100,11 +112,12 @@ impl Script {
                 }
                 ("text", _) => add(&mut steps, Event::Text(rest.to_string())),
                 ("wait", [frames]) => steps.push_back(Step::Wait(*frames as u32)),
+                ("pause", [ms]) => steps.push_back(Step::Pause(*ms as u64)),
                 ("shot", _) if !rest.is_empty() => steps.push_back(Step::Shot(PathBuf::from(rest))),
                 _ => return Err(format!("line {}: can't read {line:?}", n + 1)),
             }
         }
-        Ok(Script { steps, pointer: Pos2::ZERO, modifiers: Modifiers::NONE, wait: 0 })
+        Ok(Script { steps, pointer: Pos2::ZERO, modifiers: Modifiers::NONE, wait: 0, until: None })
     }
 
     /// Adds this frame's scripted input. Returns a screenshot to take
@@ -115,6 +128,12 @@ impl Script {
         if self.wait > 0 {
             self.wait -= 1;
             return Next::Continue;
+        }
+        if let Some(until) = self.until {
+            if std::time::Instant::now() < until {
+                return Next::Continue;
+            }
+            self.until = None;
         }
         while let Some(step) = self.steps.pop_front() {
             match step {
@@ -136,6 +155,10 @@ impl Script {
                 }
                 Step::Wait(n) => {
                     self.wait = n;
+                    return Next::Continue;
+                }
+                Step::Pause(ms) => {
+                    self.until = Some(std::time::Instant::now() + std::time::Duration::from_millis(ms));
                     return Next::Continue;
                 }
                 Step::Shot(path) => return Next::Shot(path),

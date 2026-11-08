@@ -27,6 +27,11 @@ USAGE:
     k-pdf-cli redact  <in.pdf> <out.pdf> --text <words> [pages]
     k-pdf-cli compress <in.pdf> <out.pdf> [--brotli] [--no-jpeg]
     k-pdf-cli fill    <in.pdf> <out.pdf> <name=value>...
+    k-pdf-cli search  <file.pdf> <words> [--case] [--words] [--no-images]
+    k-pdf-cli ocr     <file.pdf> [--page N]
+    k-pdf-cli scan    <out.pdf> <photo>... [--mode color|gray|bw|original] [--whole]
+                      [--no-straighten] [--handwriting] [--corners x1,y1,x2,y2,x3,y3,x4,y4]
+    k-pdf-cli images  <out.pdf> <image>...
 
 COMMANDS:
     info     Show version, page count, metadata and page sizes
@@ -59,7 +64,22 @@ COMMANDS:
     compress Make a smaller copy without losing anything: duplicates merged, streams
              recompressed (libdeflate), JPEGs optimized losslessly (MozJPEG; --no-jpeg
              skips this). --brotli also allows Brotli compression (PDF 2.0 extension):
-             smaller still, but many PDF readers can't open such files";
+             smaller still, but many PDF readers can't open such files
+    search   Find words: each place with its page and the text around it. Case and
+             line breaks are ignored (--case matches case; --words whole words
+             only). Text in images (scans, photos, figures) is read too, unless
+             --no-images, when the text-recognition models are installed
+    ocr      Print the text read in the images of each page (or one page)
+    images   Make a PDF from images kept as they are, one page per image (JPEG, PNG,
+             GIF, BMP, TIFF or WebP). JPEGs are copied in unchanged
+    scan     Make a PDF from photos of pages (JPEG, PNG, GIF, BMP, TIFF or WebP), one
+             page per photo, or clean up a scanned PDF (each of its pages, whole
+             unless --corners): the page is found in each photo, flattened,
+             straightened and cleaned up like a scan (--mode: color (default),
+             gray, bw for black and white, or original). --handwriting darkens
+             faint ink and pencil and keeps ruled lines light (and out of bw). --whole uses the whole photo; --corners gives the page's
+             corners (top left, top right, bottom right, bottom left, in pixels)
+             when there is one photo";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,6 +103,10 @@ fn main() -> ExitCode {
         Some("compress") if args.len() >= 3 => compress(&args[1..]),
         Some("edit") if args.len() == 6 => edit(&args[1], &args[2], &args[3], &args[4], &args[5]),
         Some("fill") if args.len() >= 4 => fill(&args[1], &args[2], &args[3..]),
+        Some("scan") if args.len() >= 3 => scan(&args[1..]),
+        Some("images") if args.len() >= 3 => images(&args[1..]),
+        Some("search") if args.len() >= 3 => search(&args[1..]),
+        Some("ocr") if args.len() >= 2 => ocr(&args[1..]),
         Some("-V" | "--version") => {
             println!("k-pdf-cli {}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
@@ -240,6 +264,189 @@ fn redact(args: &[String]) -> CliResult {
 #[cfg(not(feature = "compress"))]
 fn compress(_: &[String]) -> CliResult {
     Err("this build has no compression support (enable the `compress` feature)".into())
+}
+
+/// The text around `range` in `chars`, on one line.
+fn context(chars: &[k_pdf::TextChar], range: &std::ops::Range<usize>) -> String {
+    let piece = |r: std::ops::Range<usize>| k_pdf::chars_to_string(&chars[r]).split_whitespace().collect::<Vec<_>>().join(" ");
+    let before = piece(range.start.saturating_sub(40)..range.start);
+    let after = piece(range.end..(range.end + 40).min(chars.len()));
+    let tail: String = before.chars().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect();
+    let head: String = after.chars().take(30).collect();
+    format!("…{tail} [{}] {head}…", piece(range.clone()))
+}
+
+fn search(args: &[String]) -> CliResult {
+    let (path, words) = (&args[0], &args[1]);
+    let flag = |f: &str| args[2..].iter().any(|a| a == f);
+    let query = k_pdf::search::Query::new(words, flag("--case"), flag("--words")).ok_or("nothing to search for")?;
+    let doc = Document::open(path)?;
+    let pages = doc.pages()?;
+    let mut extractor = TextExtractor::new(&doc);
+    #[cfg(feature = "ocr")]
+    let (mut ocr, mut renderer) = (None::<k_pdf::ocr::Ocr>, k_pdf::Renderer::new(&doc));
+    let (mut total, mut in_images, mut found_pages, mut unread) = (0, 0, 0, 0);
+    for (i, page) in pages.iter().enumerate() {
+        let chars = extractor.extract_chars(page).unwrap_or_default();
+        let mut hits: Vec<(String, bool)> = query.find(&chars).iter().map(|m| (context(&chars, &m.chars), false)).collect();
+        #[cfg(feature = "ocr")]
+        if !flag("--no-images") && k_pdf::ocr::page_has_images(&doc, page) {
+            if ocr.is_none() {
+                ocr = k_pdf::ocr::Ocr::find().ok();
+            }
+            match &ocr {
+                Some(engine) => {
+                    let read = k_pdf::ocr::read_page_images(engine, &doc, &mut renderer, page, &chars)?;
+                    hits.extend(query.find_approximately(&read).iter().map(|m| (context(&read, &m.chars), true)));
+                }
+                None => unread += 1,
+            }
+        }
+        if !hits.is_empty() {
+            found_pages += 1;
+        }
+        for (text, image) in hits {
+            total += 1;
+            in_images += image as usize;
+            println!("page {}: {text}{}", i + 1, if image { "  (in an image)" } else { "" });
+        }
+    }
+    let s = |n: usize| if n == 1 { "" } else { "s" };
+    println!("{total} match{} on {found_pages} page{}{}", if total == 1 { "" } else { "es" }, s(found_pages), if in_images > 0 { format!(" ({in_images} in images)") } else { String::new() });
+    if unread > 0 {
+        #[cfg(feature = "ocr")]
+        eprintln!("note: images on {unread} page{} were not searched: {}", s(unread), k_pdf::ocr::not_installed());
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "ocr"))]
+fn ocr(_: &[String]) -> CliResult {
+    Err("this build can't read text in images (enable the `ocr` feature)".into())
+}
+
+#[cfg(feature = "ocr")]
+fn ocr(args: &[String]) -> CliResult {
+    let doc = Document::open(&args[0])?;
+    let pages = doc.pages()?;
+    let only = match args.get(1).map(String::as_str) {
+        Some("--page") => Some(args.get(2).and_then(|p| p.parse::<usize>().ok()).filter(|&p| p >= 1 && p <= pages.len()).ok_or("--page needs a page number")? - 1),
+        Some(other) => return Err(format!("unknown option {other:?}").into()),
+        None => None,
+    };
+    let engine = k_pdf::ocr::Ocr::find()?;
+    let mut renderer = k_pdf::Renderer::new(&doc);
+    let mut extractor = TextExtractor::new(&doc);
+    for (i, page) in pages.iter().enumerate().filter(|(i, _)| only.is_none_or(|p| p == *i)) {
+        let chars = extractor.extract_chars(page).unwrap_or_default();
+        let start = std::time::Instant::now();
+        let read = k_pdf::ocr::read_page_images(&engine, &doc, &mut renderer, page, &chars)?;
+        if read.is_empty() {
+            continue;
+        }
+        println!("--- page {} ({:.1} s)", i + 1, start.elapsed().as_secs_f32());
+        println!("{}", k_pdf::chars_to_string(&read));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "compress"))]
+fn scan(_: &[String]) -> CliResult {
+    Err("this build has no scanning support (enable the `compress` feature)".into())
+}
+
+#[cfg(feature = "compress")]
+fn scan(args: &[String]) -> CliResult {
+    use k_pdf::scan::{self, Image, Mode, ScanOptions};
+    let output = &args[0];
+    let (mut photos, mut mode, mut whole, mut straighten, mut corners) = (Vec::new(), Mode::Color, false, true, None);
+    let mut handwriting = false;
+    let mut rest = args[1..].iter();
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "--mode" => {
+                let name = rest.next().ok_or("--mode needs color, gray, bw or original")?;
+                mode = Mode::from_name(name).ok_or_else(|| format!("unknown mode {name:?} (color, gray, bw or original)"))?;
+            }
+            "--whole" => whole = true,
+            "--no-straighten" => straighten = false,
+            "--handwriting" => handwriting = true,
+            "--corners" => {
+                let v: Vec<f32> = rest
+                    .next()
+                    .ok_or("--corners needs 8 numbers")?
+                    .split(',')
+                    .map(|n| n.trim().parse::<f32>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "--corners needs 8 numbers separated by commas")?;
+                if v.len() != 8 {
+                    return Err("--corners needs 8 numbers separated by commas".into());
+                }
+                corners = Some([[v[0], v[1]], [v[2], v[3]], [v[4], v[5]], [v[6], v[7]]]);
+            }
+            _ => photos.push(a),
+        }
+    }
+    if photos.is_empty() {
+        return Err("no photos given".into());
+    }
+    if corners.is_some() && photos.len() > 1 {
+        return Err("--corners can only be used with one photo".into());
+    }
+    let mut pdf = scan::PdfWriter::new(std::io::BufWriter::new(std::fs::File::create(output)?))?;
+    let mut pages = 0;
+    for path in &photos {
+        // A PDF (a scan, or photos saved as a PDF): each page is scanned,
+        // the whole page unless --corners are given.
+        if path.to_lowercase().ends_with(".pdf") {
+            let doc = Document::open(path.as_str())?;
+            let mut renderer = k_pdf::Renderer::new(&doc);
+            for (i, page) in doc.pages()?.iter().enumerate() {
+                let image = scan::pdf_page_image(&doc, &mut renderer, page, scan::PDF_PAGE_PIXELS)?;
+                let quad = corners.unwrap_or_else(|| scan::whole(&image));
+                println!("{path}, page {}: {}×{}", i + 1, image.width, image.height);
+                pdf.add_page(&scan::scan(&image, &ScanOptions { mode, straighten, handwriting, ..ScanOptions::new(quad) }))?;
+                pages += 1;
+            }
+            continue;
+        }
+        pages += 1;
+        let photo = Image::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let found = if whole || corners.is_some() { None } else { scan::find_page(&photo) };
+        let quad = corners.or(found).unwrap_or_else(|| scan::whole(&photo));
+        match (corners, found) {
+            (Some(_), _) => println!("{path}: {}×{}, page at the given corners", photo.width, photo.height),
+            (None, Some(q)) => {
+                let q: Vec<String> = q.iter().map(|p| format!("{:.0},{:.0}", p[0], p[1])).collect();
+                println!("{path}: {}×{}, page found at {}", photo.width, photo.height, q.join(" "));
+            }
+            (None, None) => println!("{path}: {}×{}, using the whole photo", photo.width, photo.height),
+        }
+        let page = scan::scan(&photo, &ScanOptions { mode, straighten, handwriting, ..ScanOptions::new(quad) });
+        pdf.add_page(&page)?;
+    }
+    pdf.finish()?;
+    println!("wrote {output}: {pages} page{}", if pages == 1 { "" } else { "s" });
+    Ok(())
+}
+
+#[cfg(not(feature = "compress"))]
+fn images(_: &[String]) -> CliResult {
+    Err("this build can't make PDFs from images (enable the `compress` feature)".into())
+}
+
+#[cfg(feature = "compress")]
+fn images(args: &[String]) -> CliResult {
+    let output = &args[0];
+    let mut pdf = k_pdf::scan::PdfWriter::new(std::io::BufWriter::new(std::fs::File::create(output)?))?;
+    for path in &args[1..] {
+        let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        pdf.add_image(&data, 0).map_err(|e| format!("{path}: {e}"))?;
+    }
+    pdf.finish()?;
+    let n = args.len() - 1;
+    println!("wrote {output}: {n} page{}", if n == 1 { "" } else { "s" });
+    Ok(())
 }
 
 #[cfg(feature = "compress")]

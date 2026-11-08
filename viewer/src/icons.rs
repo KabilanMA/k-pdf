@@ -32,6 +32,12 @@ pub enum Icon {
     RotateRight,
     Present,
     Trash,
+    Search,
+    /// Cleaning up scanned pages: sparkles.
+    Sparkle,
+    Up,
+    Down,
+    Close,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -164,6 +170,39 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(8.0, 11.5), (8.0, 14.5)]);
             line(&[(5.0, 14.5), (11.0, 14.5)]);
             painter.add(Shape::convex_polygon(vec![p(6.5, 4.8), p(10.5, 7.0), p(6.5, 9.2)], color, Stroke::NONE));
+        }
+        Icon::Search => {
+            // A magnifying glass.
+            closed(&arc(7.0, 7.0, 4.5, 0.0, 360.0));
+            line(&[(10.3, 10.3), (14.0, 14.0)]);
+        }
+        Icon::Sparkle => {
+            // A large four-pointed star and a small one.
+            let star = |cx: f32, cy: f32, r: f32| {
+                let k = r * 0.28;
+                closed(&[
+                    (cx, cy - r),
+                    (cx + k, cy - k),
+                    (cx + r, cy),
+                    (cx + k, cy + k),
+                    (cx, cy + r),
+                    (cx - k, cy + k),
+                    (cx - r, cy),
+                    (cx - k, cy - k),
+                ]);
+            };
+            star(6.5, 9.5, 5.5);
+            star(12.5, 3.8, 2.6);
+        }
+        Icon::Up => {
+            line(&[(3.5, 10.0), (8.0, 5.5), (12.5, 10.0)]);
+        }
+        Icon::Down => {
+            line(&[(3.5, 6.0), (8.0, 10.5), (12.5, 6.0)]);
+        }
+        Icon::Close => {
+            line(&[(4.0, 4.0), (12.0, 12.0)]);
+            line(&[(12.0, 4.0), (4.0, 12.0)]);
         }
         Icon::Trash => {
             // A bin with a lid.

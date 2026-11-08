@@ -27,7 +27,7 @@
 //! can at least tell why.
 
 #[cfg(feature = "compress")]
-mod jpeg;
+pub(crate) mod jpeg;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};

@@ -159,7 +159,7 @@ fn brotli(input: &[u8], strict: bool) -> Result<Vec<u8>> {
 
 /// LZW decoding as used by PDF (and TIFF): MSB-first codes, 9–12 bits,
 /// 256 = clear table, 257 = end of data.
-fn lzw(input: &[u8], early_change: bool) -> Vec<u8> {
+pub(crate) fn lzw(input: &[u8], early_change: bool) -> Vec<u8> {
     const CLEAR: usize = 256;
     const EOD: usize = 257;
     // Each table entry is (prefix code, last byte); strings are

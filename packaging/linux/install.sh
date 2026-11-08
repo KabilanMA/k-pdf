@@ -8,6 +8,10 @@
 #                                (from the source tree: rebuilds show up at once)
 #   ./install.sh --uninstall     remove what was installed
 #
+# The text-recognition models (for finding words in images) are installed
+# from models/ next to this script (release archives have them); from the
+# source tree, packaging/fetch-ocr-models.sh downloads them.
+#
 # Run it from an unpacked release (the programs are next to it) or from the
 # source tree after `cargo build --release --workspace`.
 set -eu
@@ -17,6 +21,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$PREFIX/bin"
 APPS="$PREFIX/share/applications"
 ICONS="$PREFIX/share/icons/hicolor"
+MODELS="$PREFIX/share/k-pdf/models"
 
 refresh() {
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$APPS" || true
@@ -26,6 +31,8 @@ refresh() {
 case "${1:-}" in
 --uninstall)
     rm -f "$BIN/k-pdf" "$BIN/k-pdf-cli" "$APPS/k-pdf.desktop" "$ICONS/scalable/apps/k-pdf.svg"
+    rm -f "$MODELS/text-detection.onnx" "$MODELS/text-recognition.onnx"
+    rmdir "$MODELS" "$PREFIX/share/k-pdf" 2>/dev/null || true
     refresh
     echo "k-pdf removed from $PREFIX"
     exit 0
@@ -58,6 +65,12 @@ for prog in k-pdf k-pdf-cli; do
     fi
 done
 install -m 644 "$HERE/k-pdf.svg" "$ICONS/scalable/apps/k-pdf.svg"
+if [ -f "$HERE/models/text-recognition.onnx" ]; then
+    mkdir -p "$MODELS"
+    install -m 644 "$HERE/models/text-detection.onnx" "$HERE/models/text-recognition.onnx" "$MODELS/"
+elif [ ! -f "$MODELS/text-recognition.onnx" ] && [ ! -f "${XDG_DATA_HOME:-$HOME/.local/share}/k-pdf/models/text-recognition.onnx" ]; then
+    echo "note: to find words in images (scans, photos), run packaging/fetch-ocr-models.sh"
+fi
 # Launchers don't always search ~/.local/bin: point at the program itself.
 sed "s|^Exec=k-pdf |Exec=$BIN/k-pdf |" "$HERE/k-pdf.desktop" > "$APPS/k-pdf.desktop"
 chmod 644 "$APPS/k-pdf.desktop"

@@ -41,3 +41,4 @@ flamegraph.svg
 
 # Release archives (packaging/linux/package.sh)
 /dist/
+/playground/

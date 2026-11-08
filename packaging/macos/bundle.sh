@@ -19,6 +19,8 @@ for bin in k-pdf k-pdf-cli; do
         "target/aarch64-apple-darwin/release/$bin" "target/x86_64-apple-darwin/release/$bin"
 done
 cp packaging/macos/k-pdf.icns "$APP/Contents/Resources/k-pdf.icns"
+# The text-recognition models, found in ../Resources/models from the program.
+packaging/fetch-ocr-models.sh "$APP/Contents/Resources/models"
 sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 # Apple Silicon only runs signed programs: sign ad hoc (no developer ID).
 codesign --force --deep --sign - "$APP"
