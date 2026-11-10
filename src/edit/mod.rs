@@ -19,6 +19,7 @@ pub mod annotate;
 mod content;
 pub mod fields;
 pub mod fonts;
+mod picture;
 mod redact;
 #[cfg(feature = "render")]
 mod subset;
@@ -28,6 +29,7 @@ use std::io::Write as _;
 
 pub use content::Glyph;
 pub use fonts::FontLook;
+pub use picture::place_image;
 pub use redact::{find_text, redact_page, Redacted};
 
 use crate::document::Document;

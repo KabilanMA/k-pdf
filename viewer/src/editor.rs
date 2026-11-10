@@ -76,7 +76,7 @@ impl Editor {
     pub fn open(&mut self, path: &Path) {
         let fonts = std::mem::take(&mut self.fonts);
         let families = self.families.take();
-        *self = Editor { doc: k_pdf::Document::open(path).ok(), fonts, families, ..Editor::default() };
+        *self = Editor { doc: crate::password::open(path).ok(), fonts, families, ..Editor::default() };
     }
 
     pub fn changes(&self) -> &Changes {
@@ -236,6 +236,12 @@ impl Editor {
             let spec = fields::FieldSpec { name: fields::new_field_name(doc, kind), multiline, ..Default::default() };
             fields::add_field(doc, page, rect, kind, &spec, changes)
         })
+    }
+
+    /// Draws a signature into page `page` over `rect` (display points).
+    pub fn place_picture(&mut self, page: usize, signature: &k_pdf::scan::Signature, rect: [f32; 4]) -> Result<Changes, String> {
+        self.form_edit(|doc, changes| k_pdf::edit::place_image(doc, page, signature.width, signature.height, &signature.rgba, rect, changes))
+            .map(|(before, ())| before)
     }
 
     pub fn update_field(&mut self, id: ObjRef, spec: &k_pdf::edit::fields::FieldSpec) -> Result<Changes, String> {

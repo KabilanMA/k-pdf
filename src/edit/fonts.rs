@@ -487,6 +487,82 @@ pub fn screen_font(family: &str, bold: bool, italic: bool) -> Option<(Vec<u8>, u
     None
 }
 
+/// Handwriting fonts installed on the system, best first, for typed
+/// signatures: script and hand-lettered families that come with Windows,
+/// macOS and common Linux font packages, then any other family whose name
+/// says it is a script. With few of those, italic serif and sans fonts
+/// fill in (an italic reads more like writing than an upright face).
+#[cfg(feature = "render")]
+pub fn handwriting_fonts() -> Vec<String> {
+    const KNOWN: &[&str] = &[
+        // Windows.
+        "Segoe Script", "Lucida Handwriting", "Edwardian Script ITC", "Brush Script MT", "Freestyle Script",
+        "Vladimir Script", "Kunstler Script", "Ink Free", "Segoe Print", "Mistral",
+        // macOS.
+        "Snell Roundhand", "Apple Chancery", "Savoye LET", "Bradley Hand", "Zapfino", "Noteworthy",
+        // Linux packages and Google fonts.
+        "Z003", "URW Chancery L", "TeX Gyre Chorus", "Great Vibes", "Pinyon Script", "Alex Brush", "Allura",
+        "Parisienne", "Sacramento", "Dancing Script", "Satisfy", "Kaushan Script", "Caveat", "Homemade Apple",
+        "QTMerryScript", "QTHandwriting", "QTChanceryType", "Purisa", "Comic Neue",
+    ];
+    const MOST: usize = 8;
+    let db = system_db();
+    let families: Vec<&str> = {
+        let mut f: Vec<&str> = db.faces().filter_map(|f| f.families.first().map(|(n, _)| n.as_str())).collect();
+        f.sort_unstable();
+        f.dedup();
+        f
+    };
+    let mut out: Vec<String> = Vec::new();
+    let push = |name: &str, out: &mut Vec<String>| {
+        if out.len() < MOST && !out.iter().any(|o| o.eq_ignore_ascii_case(name)) {
+            out.push(name.to_string());
+        }
+    };
+    for want in KNOWN {
+        if let Some(have) = families.iter().find(|f| f.eq_ignore_ascii_case(want)) {
+            push(have, &mut out);
+        }
+    }
+    for f in &families {
+        let l = f.to_ascii_lowercase();
+        let scripty = ["script", "handwriting", "chancery", "calligraph"].iter().any(|w| l.contains(w));
+        let not = ["math", "noto", "symbol", "mono", "fetamont"].iter().any(|w| l.contains(w));
+        if scripty && !not {
+            push(f, &mut out);
+        }
+    }
+    // TeX Gyre Chorus and URW Chancery L are copies of Z003.
+    if out.iter().any(|f| f == "Z003") {
+        out.retain(|f| f != "TeX Gyre Chorus" && f != "URW Chancery L");
+    }
+    if out.len() < 3 {
+        for generic in [fontdb::Family::Serif, fontdb::Family::SansSerif] {
+            let query = fontdb::Query { families: &[generic], weight: fontdb::Weight::NORMAL, style: fontdb::Style::Italic, stretch: fontdb::Stretch::Normal };
+            if let Some(name) = db.query(&query).and_then(|id| db.face(id)).and_then(|f| f.families.first().map(|(n, _)| n.clone())) {
+                push(&name, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The file of an installed family (`(file data, face index)`), its
+/// italic when it has one and `italic` is asked for. Unlike
+/// [`screen_font`], nothing else stands in for a missing family.
+#[cfg(feature = "render")]
+pub fn family_font(family: &str, italic: bool) -> Option<(Vec<u8>, u32)> {
+    let db = system_db();
+    let style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+    let query = fontdb::Query { families: &[fontdb::Family::Name(family)], weight: fontdb::Weight::NORMAL, style, stretch: fontdb::Stretch::Normal };
+    let id = db.query(&query)?;
+    if !db.face(id)?.families.iter().any(|(f, _)| f.eq_ignore_ascii_case(family)) {
+        return None;
+    }
+    let (data, index) = load_face(db, id)?;
+    Some(((*data).as_ref().to_vec(), index))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

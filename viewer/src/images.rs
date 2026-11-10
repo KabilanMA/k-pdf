@@ -75,7 +75,10 @@ type Overlay = Option<Arc<k_pdf::Changes>>;
 
 /// Opens a PDF, with `overlay` (unsaved edits) when given.
 fn open_pdf(path: &Path, overlay: &Overlay) -> Result<k_pdf::Document, String> {
-    let doc = k_pdf::Document::open(path).map_err(|e| e.to_string())?;
+    let doc = crate::password::open(path).map_err(|e| match e {
+        k_pdf::Error::PasswordNeeded | k_pdf::Error::WrongPassword => "it is protected by a password (open it on its own first, to enter it)".to_string(),
+        e => e.to_string(),
+    })?;
     if let Some(changes) = overlay {
         doc.set_overlay(changes);
     }
@@ -529,9 +532,6 @@ impl Images {
                         return Ok(loaded(None, [image.width, image.height], &image, found));
                     }
                     let doc = open_pdf(path, overlay)?;
-                    if doc.is_encrypted() {
-                        return Err("encrypted PDFs can't be read yet".into());
-                    }
                     let pages = doc.pages().map_err(|e| e.to_string())?;
                     let mut renderer = k_pdf::Renderer::new(&doc);
                     for (i, page) in pages.iter().enumerate() {
@@ -1699,7 +1699,7 @@ fn write_pages(jobs: &[Job], target: &Path, tx: &mpsc::Sender<Msg>) -> Result<()
             let d = match keys.iter().position(|k| *k == key) {
                 Some(k) => k + usize::from(made > 0),
                 None => {
-                    let doc = k_pdf::Document::open(path).map_err(|e| format!("{}: {e}", file_name(path)))?;
+                    let doc = crate::password::open(path).map_err(|e| format!("{}: {e}", file_name(path)))?;
                     if key.1 != 0 {
                         let mut changes = k_pdf::Changes::default();
                         for i in 0..doc.page_count().map_err(|e| e.to_string())? {
@@ -1715,7 +1715,12 @@ fn write_pages(jobs: &[Job], target: &Path, tx: &mpsc::Sender<Msg>) -> Result<()
             pages.push((d, page.unwrap_or(0)));
         }
         let refs: Vec<&k_pdf::Document> = docs.iter().collect();
-        crate::write_atomically(target, |out| k_pdf::write_document(&refs, &pages, out).map_err(|e| e.to_string()))
+        // A new document: not protected, even when a file it takes pages
+        // from was.
+        let options = k_pdf::WriteOptions { decrypt: true, ..Default::default() };
+        crate::write_atomically(target, |out| {
+            k_pdf::write_document_with_options(&refs, &pages, &k_pdf::Changes::default(), &options, out).map_err(|e| e.to_string())
+        })
     })();
     std::fs::remove_file(&made_file).ok();
     result

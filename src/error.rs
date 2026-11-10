@@ -11,8 +11,15 @@ pub enum Error {
     Object(String),
     /// A stream filter failed or is not supported.
     Filter(String),
-    /// The document is encrypted and decryption is not implemented yet.
-    Encrypted,
+    /// The document is encrypted in a way that can't be read (not with a
+    /// password, or with an unknown method); the message says how, as a
+    /// sentence fragment.
+    Encrypted(String),
+    /// The document is protected by a password, and none (or an empty one)
+    /// was given.
+    PasswordNeeded,
+    /// The password given doesn't open the document.
+    WrongPassword,
     /// A photo could not be read (see `scan`); the message is a sentence
     /// fragment such as "not a JPEG or PNG image".
     Image(String),
@@ -33,7 +40,9 @@ impl fmt::Display for Error {
             Error::Parse { offset, msg } => write!(f, "parse error at byte {offset}: {msg}"),
             Error::Object(msg) => write!(f, "object error: {msg}"),
             Error::Filter(msg) => write!(f, "filter error: {msg}"),
-            Error::Encrypted => write!(f, "document is encrypted (decryption not supported yet)"),
+            Error::Encrypted(msg) => write!(f, "can't read it: {msg}"),
+            Error::PasswordNeeded => f.write_str("it is protected by a password"),
+            Error::WrongPassword => f.write_str("the password is not correct"),
             Error::Image(msg) => f.write_str(msg),
         }
     }

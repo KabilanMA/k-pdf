@@ -44,6 +44,14 @@ pub enum Icon {
     FitPage,
     /// Making a form: a page with a text box and a check box.
     Form,
+    /// Signing: a pen and the squiggle it wrote.
+    Sign,
+    /// A password-protected file: a padlock.
+    Lock,
+    /// Showing a password: an open eye.
+    Eye,
+    /// Hiding a password: an eye struck through.
+    EyeOff,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -195,6 +203,30 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             closed(&[(5.0, 4.0), (11.0, 4.0), (11.0, 6.5), (5.0, 6.5)]);
             closed(&[(5.0, 9.5), (7.5, 9.5), (7.5, 12.0), (5.0, 12.0)]);
             line(&[(9.0, 10.75), (11.0, 10.75)]);
+        }
+        Icon::Sign => {
+            line(&[(1.5, 13.0), (2.8, 11.0), (4.0, 13.2), (5.3, 11.2), (6.5, 13.2), (7.8, 12.4)]);
+            closed(&[(9.4, 9.6), (13.2, 2.4), (15.0, 3.4), (11.2, 10.6)]);
+            line(&[(9.4, 9.6), (9.0, 12.4), (11.2, 10.6)]);
+        }
+        Icon::Lock => {
+            // The body, the shackle over it, and a keyhole.
+            closed(&[(3.0, 7.5), (13.0, 7.5), (13.0, 14.5), (3.0, 14.5)]);
+            let mut shackle = vec![(5.0, 7.5)];
+            shackle.extend(arc(8.0, 5.0, 3.0, 180.0, 360.0));
+            shackle.push((11.0, 7.5));
+            line(&shackle);
+            line(&[(8.0, 10.2), (8.0, 11.8)]);
+        }
+        Icon::Eye | Icon::EyeOff => {
+            // An almond outline and the pupil.
+            let mut outline = arc(8.0, 10.57, 6.07, 205.0, 335.0);
+            outline.extend(arc(8.0, 5.43, 6.07, 25.0, 155.0));
+            closed(&outline);
+            closed(&arc(8.0, 8.0, 2.0, 0.0, 360.0));
+            if icon == Icon::EyeOff {
+                line(&[(2.5, 2.5), (13.5, 13.5)]);
+            }
         }
         Icon::Search => {
             // A magnifying glass.

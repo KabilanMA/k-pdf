@@ -8,6 +8,7 @@ k-pdf-cli — the command-line tool of k-pdf, a small, low-memory PDF library
 
 USAGE:
     k-pdf-cli info   <file.pdf>
+    k-pdf-cli decrypt <in.pdf> <out.pdf> --password <password>
     k-pdf-cli text   <file.pdf> [--page N]
     k-pdf-cli object <file.pdf> <num> [gen] [--decode]
     k-pdf-cli render <file.pdf> <page> <out.png> [--scale S] [--dark]
@@ -30,14 +31,22 @@ USAGE:
     k-pdf-cli blank   <out.pdf> [letter|a4|<width>x<height>]
     k-pdf-cli add-field <in.pdf> <out.pdf> <text|check|dropdown> <name> <page> <left> <top> <right> <bottom>
                       [--multiline] [--required] [--size PT] [--options a,b,c] [--tooltip <text>]
+    k-pdf-cli sign    <in.pdf> <out.pdf> <page> <left> <top> <width> --from <image|pdf>
+                      [--source-page N] [--area x0,y0,x1,y1] [--ink original|black|blue]
+    k-pdf-cli sign    <in.pdf> <out.pdf> <page> <left> <top> <width> --text <name>
+                      [--font <family>] [--ink black|blue]
     k-pdf-cli search  <file.pdf> <words> [--case] [--words] [--no-images]
     k-pdf-cli ocr     <file.pdf> [--page N]
     k-pdf-cli scan    <out.pdf> <photo>... [--mode color|gray|bw|original] [--whole]
                       [--no-straighten] [--handwriting] [--corners x1,y1,x2,y2,x3,y3,x4,y4]
     k-pdf-cli images  <out.pdf> <image>...
 
+    Password-protected PDFs: add --password <password> (the user's or the
+    owner's) to any command. Saved copies keep the same password.
+
 COMMANDS:
     info     Show version, page count, metadata and page sizes
+    decrypt  Save a copy of a password-protected PDF without its password
     text     Extract plain text (all pages, or one page with --page, 1-based)
     object   Print an object; with --decode, write a stream's decoded data to stdout
     render   Render a page (1-based) to a PNG; scale is pixels per point (default 2);
@@ -59,6 +68,14 @@ COMMANDS:
              as shown): a text box (--multiline for several lines), a check box or a
              drop-down list (--options). --size sets the text size (default: fit
              to the field); --required marks it as needing an answer
+    sign     Put a signature on a page (1-based; points from its top-left corner as
+             shown; the height follows from the width): the signature is lifted off
+             a photo or scan (an image, or a page of a PDF, --source-page, default 1),
+             from --area (pixels; a PDF page is 3300 pixels on its longer side) or
+             all of it, with the paper made transparent and the ink in one color
+             (--ink: as written (default), black or blue). With --text, the name is
+             written in a handwriting font instead (--font, default the first one
+             installed; `sign --fonts` lists them)
     crop     Keep only the given area of pages (points from the top-left corner of the
              page as shown; all pages, or e.g. \"1,3-5\"); \"crop in out none\" uncrops
     rotate   Turn pages clockwise by 90, 180 or 270 degrees (negative: counterclockwise);
@@ -90,10 +107,28 @@ COMMANDS:
              corners (top left, top right, bottom right, bottom left, in pixels)
              when there is one photo";
 
+/// The password given with `--password`, for protected files.
+static PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Opens a PDF, with the password given with `--password` if it is
+/// protected.
+fn open_pdf(path: impl AsRef<std::path::Path>) -> k_pdf::Result<Document> {
+    Document::open_with_password(path, PASSWORD.get().map_or("", String::as_str))
+}
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `--password` goes with any command.
+    if let Some(i) = args.iter().position(|a| a == "--password")
+        && i + 1 < args.len()
+    {
+        let password = args.remove(i + 1);
+        args.remove(i);
+        PASSWORD.set(password).ok();
+    }
     let result = match args.first().map(String::as_str) {
         Some("info") if args.len() == 2 => info(&args[1]),
+        Some("decrypt") if args.len() == 3 => decrypt(&args[1], &args[2]),
         Some("text") => text(&args[1..]),
         Some("object") => object(&args[1..]),
         Some("render") => render(&args[1..]),
@@ -114,6 +149,8 @@ fn main() -> ExitCode {
         Some("fill") if args.len() >= 4 => fill(&args[1], &args[2], &args[3..]),
         Some("blank") if args.len() == 2 || args.len() == 3 => blank(&args[1..]),
         Some("add-field") if args.len() >= 10 => add_field(&args[1..]),
+        Some("sign") if args.get(1).is_some_and(|a| a == "--fonts") => sign_fonts(),
+        Some("sign") if args.len() >= 9 => sign(&args[1..]),
         Some("scan") if args.len() >= 3 => scan(&args[1..]),
         Some("images") if args.len() >= 3 => images(&args[1..]),
         Some("search") if args.len() >= 3 => search(&args[1..]),
@@ -143,7 +180,7 @@ fn main() -> ExitCode {
 type CliResult = Result<(), Box<dyn std::error::Error>>;
 
 fn reorder(input: &str, output: &str, spec: &str) -> CliResult {
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let order = parse_page_list(spec, count)?;
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
@@ -156,7 +193,7 @@ fn reorder(input: &str, output: &str, spec: &str) -> CliResult {
 }
 
 fn delete(input: &str, output: &str, spec: &str) -> CliResult {
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let gone = parse_page_list(spec, count)?;
     let keep: Vec<usize> = (0..count).filter(|p| !gone.contains(p)).collect();
@@ -176,7 +213,7 @@ fn crop(args: &[String]) -> CliResult {
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
         return Err("the output must be a different file than the input".into());
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let (rect, rest) = if args[2] == "none" {
         (None, &args[3..])
@@ -204,7 +241,7 @@ fn rotate(args: &[String]) -> CliResult {
         return Err("the output must be a different file than the input".into());
     }
     let degrees: i32 = args[2].parse().map_err(|_| format!("{:?} isn't a number of degrees", args[2]))?;
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let pages = match args.get(3) {
         Some(spec) => parse_page_list(spec, count)?,
@@ -225,7 +262,7 @@ fn redact(args: &[String]) -> CliResult {
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
         return Err("the output must be a different file than the input".into());
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     // Areas to redact on each page.
     let mut areas: Vec<(usize, Vec<[f32; 4]>)> = Vec::new();
@@ -291,7 +328,7 @@ fn search(args: &[String]) -> CliResult {
     let (path, words) = (&args[0], &args[1]);
     let flag = |f: &str| args[2..].iter().any(|a| a == f);
     let query = k_pdf::search::Query::new(words, flag("--case"), flag("--words")).ok_or("nothing to search for")?;
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let pages = doc.pages()?;
     let mut extractor = TextExtractor::new(&doc);
     #[cfg(feature = "ocr")]
@@ -338,7 +375,7 @@ fn ocr(_: &[String]) -> CliResult {
 
 #[cfg(feature = "ocr")]
 fn ocr(args: &[String]) -> CliResult {
-    let doc = Document::open(&args[0])?;
+    let doc = open_pdf(&args[0])?;
     let pages = doc.pages()?;
     let only = match args.get(1).map(String::as_str) {
         Some("--page") => Some(args.get(2).and_then(|p| p.parse::<usize>().ok()).filter(|&p| p >= 1 && p <= pages.len()).ok_or("--page needs a page number")? - 1),
@@ -410,7 +447,7 @@ fn scan(args: &[String]) -> CliResult {
         // A PDF (a scan, or photos saved as a PDF): each page is scanned,
         // the whole page unless --corners are given.
         if path.to_lowercase().ends_with(".pdf") {
-            let doc = Document::open(path.as_str())?;
+            let doc = open_pdf(path.as_str())?;
             let mut renderer = k_pdf::Renderer::new(&doc);
             for (i, page) in doc.pages()?.iter().enumerate() {
                 let image = scan::pdf_page_image(&doc, &mut renderer, page, scan::PDF_PAGE_PIXELS)?;
@@ -477,7 +514,7 @@ fn compress(args: &[String]) -> CliResult {
     if options.brotli {
         eprintln!("warning: {}", BROTLI_WARNING);
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let before = std::fs::metadata(input)?.len();
     let mut file = std::io::BufWriter::new(std::fs::File::create(output)?);
     let report = k_pdf::compress::compress(&doc, &options, &mut file)?;
@@ -500,7 +537,7 @@ printers will refuse it or show blank pages, and it is no longer valid PDF/A. Ke
 you share the file.";
 
 fn blocks(path: &str, page: &str) -> CliResult {
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let page: usize = page.parse::<usize>().map_err(|_| "invalid page number")?.max(1) - 1;
     let text = k_pdf::edit::page_text(&doc, page)?;
     for (i, b) in text.blocks.iter().enumerate() {
@@ -521,7 +558,7 @@ fn edit(input: &str, output: &str, page: &str, block: &str, new_text: &str) -> C
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
         return Err("the output must be a different file than the input".into());
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let page: usize = page.parse::<usize>().map_err(|_| "invalid page number")?.max(1) - 1;
     let text = k_pdf::edit::page_text(&doc, page)?;
     let b = text.blocks.get(block.parse::<usize>().map_err(|_| "invalid block number")?).ok_or("no such block")?;
@@ -549,7 +586,7 @@ fn edit(input: &str, output: &str, page: &str, block: &str, new_text: &str) -> C
 
 fn comments(path: &str) -> CliResult {
     use k_pdf::edit::annotate::CommentKind;
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let list = k_pdf::edit::annotate::comments(&doc)?;
     if list.is_empty() {
         println!("no comments");
@@ -581,7 +618,7 @@ fn highlight(args: &[String]) -> CliResult {
         Some(other) => return Err(format!("unexpected {other:?}").into()),
         None => "",
     };
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let mut changes = k_pdf::Changes::default();
     let mut found = 0;
@@ -606,7 +643,7 @@ fn note(args: &[String]) -> CliResult {
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
         return Err("the output must be a different file than the input".into());
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let page: usize = args[2].parse().map_err(|_| "invalid page number")?;
     if page == 0 || page > count {
@@ -652,7 +689,7 @@ fn add_field(args: &[String]) -> CliResult {
         "dropdown" => NewField::Dropdown,
         other => return Err(format!("unknown field kind \"{other}\" (text, check or dropdown)").into()),
     };
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let count = doc.page_count()?;
     let page: usize = args[4].parse().map_err(|_| "invalid page number")?;
     if page == 0 || page > count {
@@ -682,8 +719,119 @@ fn add_field(args: &[String]) -> CliResult {
     Ok(())
 }
 
+#[cfg(not(all(feature = "compress", feature = "render")))]
+fn sign_fonts() -> CliResult {
+    Err("this build has no fonts for signatures (enable the `render` feature)".into())
+}
+
+/// Lists the handwriting fonts typed signatures can use.
+#[cfg(all(feature = "compress", feature = "render"))]
+fn sign_fonts() -> CliResult {
+    for f in k_pdf::edit::fonts::handwriting_fonts() {
+        println!("{f}");
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "compress"))]
+fn sign(_: &[String]) -> CliResult {
+    Err("this build can't read signatures from images (enable the `compress` feature)".into())
+}
+
+#[cfg(feature = "compress")]
+fn sign(args: &[String]) -> CliResult {
+    use k_pdf::scan::Ink;
+    let (input, output) = (&args[0], &args[1]);
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    let number = |v: &String| v.parse::<f32>().map_err(|_| format!("invalid number \"{v}\""));
+    let page: usize = args[2].parse().map_err(|_| "invalid page number")?;
+    let (left, top, width) = (number(&args[3])?, number(&args[4])?, number(&args[5])?);
+    let (mut from, mut source_page, mut area, mut ink) = (None, 1usize, None, Ink::Original);
+    let (mut text, mut font) = (None, None);
+    let mut rest = args[6..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--from" => from = Some(rest.next().ok_or("--from needs a file")?),
+            "--text" => text = Some(rest.next().ok_or("--text needs a name")?),
+            "--font" => font = Some(rest.next().ok_or("--font needs a font family")?),
+            "--source-page" => source_page = rest.next().ok_or("--source-page needs a number")?.parse().map_err(|_| "invalid page number")?,
+            "--area" => {
+                let v: Vec<u32> = rest
+                    .next()
+                    .ok_or("--area needs 4 numbers")?
+                    .split(',')
+                    .map(|n| n.trim().parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "--area needs 4 whole numbers separated by commas")?;
+                area = Some(<[u32; 4]>::try_from(v).map_err(|_| "--area needs 4 numbers")?);
+            }
+            "--ink" => {
+                ink = match rest.next().map(String::as_str) {
+                    Some("original") => Ink::Original,
+                    Some("black") => Ink::Black,
+                    Some("blue") => Ink::Blue,
+                    _ => return Err("--ink needs original, black or blue".into()),
+                }
+            }
+            other => return Err(format!("unknown option \"{other}\"").into()),
+        }
+    }
+    let signature = match (from, text) {
+        (Some(_), Some(_)) => return Err("use either --from or --text, not both".into()),
+        (None, None) => return Err("--from (a photo or scan of the signature) or --text (a name to write) is needed".into()),
+        (None, Some(text)) => typed(text, font.map(String::as_str), ink)?,
+        (Some(from), None) => lifted(from, source_page, area, ink)?,
+    };
+    let doc = open_pdf(input)?;
+    let count = doc.page_count()?;
+    if page == 0 || page > count {
+        return Err(format!("there is no page {page}").into());
+    }
+    let height = width * signature.height as f32 / signature.width as f32;
+    let mut changes = k_pdf::Changes::default();
+    k_pdf::edit::place_image(&doc, page - 1, signature.width, signature.height, &signature.rgba, [left, top, left + width, top + height], &mut changes)?;
+    let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+    k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
+    println!("wrote {output}: a {}×{} pixel signature, {width:.0}×{height:.0} pt", signature.width, signature.height);
+    Ok(())
+}
+
+/// The signature lifted off a photo or scan (an image, or a page of a PDF).
+#[cfg(feature = "compress")]
+fn lifted(from: &str, source_page: usize, area: Option<[u32; 4]>, ink: k_pdf::scan::Ink) -> Result<k_pdf::scan::Signature, Box<dyn std::error::Error>> {
+    use k_pdf::scan::{self, Image};
+    let image = if from.to_lowercase().ends_with(".pdf") {
+        let source = open_pdf(from)?;
+        let pages = source.pages()?;
+        let p = pages.get(source_page.wrapping_sub(1)).ok_or_else(|| format!("{from} has no page {source_page}"))?;
+        scan::pdf_page_image(&source, &mut k_pdf::Renderer::new(&source), p, scan::PDF_PAGE_PIXELS)?
+    } else {
+        Image::open(from)?
+    };
+    let area = area.unwrap_or([0, 0, image.width, image.height]);
+    Ok(scan::lift_signature(&image, area, ink).ok_or("no signature found there: the area looks like blank paper")?)
+}
+
+#[cfg(all(feature = "compress", not(feature = "render")))]
+fn typed(_: &str, _: Option<&str>, _: k_pdf::scan::Ink) -> Result<k_pdf::scan::Signature, Box<dyn std::error::Error>> {
+    Err("this build has no fonts for signatures (enable the `render` feature)".into())
+}
+
+/// A name written in a handwriting font, at 160 pixels to the em.
+#[cfg(all(feature = "compress", feature = "render"))]
+fn typed(text: &str, font: Option<&str>, ink: k_pdf::scan::Ink) -> Result<k_pdf::scan::Signature, Box<dyn std::error::Error>> {
+    use k_pdf::edit::fonts;
+    let family = match font {
+        Some(f) => f.to_string(),
+        None => fonts::handwriting_fonts().into_iter().next().ok_or("no handwriting font is installed (try --font with any font)")?,
+    };
+    let (data, index) = fonts::family_font(&family, true).ok_or_else(|| format!("the font \"{family}\" isn't installed"))?;
+    Ok(k_pdf::scan::typed_signature(text, &data, index, 160.0, ink).ok_or_else(|| format!("\"{family}\" has none of the letters of \"{text}\""))?)
+}
 fn outline(path: &str) -> CliResult {
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let pages = doc.pages()?;
     let items = k_pdf::outline(&doc, &pages);
     if items.is_empty() {
@@ -702,7 +850,7 @@ fn outline(path: &str) -> CliResult {
 
 fn form(path: &str) -> CliResult {
     use k_pdf::{FieldKind, FieldValue};
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let fields = k_pdf::form_fields(&doc)?;
     if fields.is_empty() {
         println!("no form fields");
@@ -742,7 +890,7 @@ fn fill(input: &str, output: &str, assignments: &[String]) -> CliResult {
     if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
         return Err("the output must be a different file than the input".into());
     }
-    let doc = Document::open(input)?;
+    let doc = open_pdf(input)?;
     let fields = k_pdf::form_fields(&doc)?;
     let mut values = Vec::new();
     for a in assignments {
@@ -775,7 +923,7 @@ fn merge(output: &str, inputs: &[String]) -> CliResult {
     if inputs.iter().any(|i| std::path::Path::new(i).canonicalize().ok() == out_path && out_path.is_some()) {
         return Err("the output must be a different file than the inputs".into());
     }
-    let docs: Vec<Document> = inputs.iter().map(Document::open).collect::<Result<_, _>>()?;
+    let docs: Vec<Document> = inputs.iter().map(open_pdf).collect::<Result<_, _>>()?;
     let mut pages = Vec::new();
     for (d, doc) in docs.iter().enumerate() {
         pages.extend((0..doc.page_count()?).map(|p| (d, p)));
@@ -810,14 +958,27 @@ fn parse_page_list(spec: &str, count: usize) -> Result<Vec<usize>, String> {
     Ok(out)
 }
 
+/// Saves a copy of a protected PDF without its password.
+fn decrypt(input: &str, output: &str) -> CliResult {
+    let doc = open_pdf(input)?;
+    if doc.encryption().is_none() {
+        return Err(format!("{input} isn't protected by a password").into());
+    }
+    let pages: Vec<(usize, usize)> = (0..doc.page_count()?).map(|p| (0, p)).collect();
+    let options = k_pdf::WriteOptions { decrypt: true, ..Default::default() };
+    k_pdf::write_document_with_options(&[&doc], &pages, &k_pdf::Changes::default(), &options, std::fs::File::create(output)?)?;
+    println!("wrote {output}");
+    Ok(())
+}
+
 fn info(path: &str) -> CliResult {
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let pages = doc.pages()?;
     println!("File:       {path}");
     println!("Version:    PDF {}", doc.version());
     println!("Pages:      {}", pages.len());
     println!("Objects:    {}", doc.object_count());
-    println!("Encrypted:  {}", if doc.is_encrypted() { "yes" } else { "no" });
+    println!("Encrypted:  {}", doc.encryption().map_or("no".to_string(), |how| format!("yes ({how})")));
     if doc.was_repaired() {
         println!("Repaired:   yes (cross-reference table was damaged and rebuilt)");
     }
@@ -863,7 +1024,7 @@ fn text(args: &[String]) -> CliResult {
         Some(other) => return Err(format!("unknown option '{other}'").into()),
         None => None,
     };
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let pages = doc.pages()?;
     let mut extractor = TextExtractor::new(&doc);
     let stdout = std::io::stdout();
@@ -893,7 +1054,7 @@ fn object(args: &[String]) -> CliResult {
     let decode = rest.iter().any(|a| a == "--decode");
     let generation: u16 = rest.iter().find(|a| *a != "--decode").map(|g| g.parse()).transpose()?.unwrap_or(0);
 
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let obj = doc.get_object(ObjRef::new(num, generation))?;
     match (&obj, decode) {
         (Object::Stream(s), true) => {
@@ -927,7 +1088,7 @@ fn render(args: &[String]) -> CliResult {
             other => return Err(format!("unknown option {other}").into()),
         }
     }
-    let doc = Document::open(path)?;
+    let doc = open_pdf(path)?;
     let pages = doc.pages()?;
     let page = pages.get(page.wrapping_sub(1)).ok_or("page out of range")?;
     let start = std::time::Instant::now();

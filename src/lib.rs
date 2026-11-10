@@ -16,6 +16,7 @@
 //! ```
 
 mod ccitt;
+mod crypt;
 #[cfg(feature = "compress")]
 pub mod compress;
 mod document;

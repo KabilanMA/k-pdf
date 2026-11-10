@@ -21,6 +21,8 @@ mod present;
 mod print;
 mod fields;
 mod redact;
+mod signature;
+mod password;
 mod rotate;
 mod images;
 mod search;
@@ -246,7 +248,7 @@ fn save_pages(
     text_changes: &k_pdf::Changes,
     target: &std::path::Path,
 ) -> Result<(), String> {
-    write_atomically(target, |file| build_pdf(files, pages, form_edits, text_changes, file))
+    write_atomically(target, |file| build_pdf(files, pages, form_edits, text_changes, false, file))
 }
 
 /// Writes the PDF described as for [`save_pages`] to `out`.
@@ -255,6 +257,7 @@ fn build_pdf(
     pages: &[(usize, usize)],
     form_edits: &[(k_pdf::ObjRef, k_pdf::FieldValue)],
     text_changes: &k_pdf::Changes,
+    decrypt: bool,
     out: impl std::io::Write,
 ) -> Result<(), String> {
     // Open the files that are used (inserted files whose pages were all
@@ -262,7 +265,7 @@ fn build_pdf(
     let mut docs: Vec<Option<k_pdf::Document>> = Vec::new();
     for (i, path) in files.iter().enumerate() {
         let used = i == 0 || pages.iter().any(|&(d, _)| d == i);
-        docs.push(if used { Some(k_pdf::Document::open(path).map_err(|e| e.to_string())?) } else { None });
+        docs.push(if used { Some(password::open(path).map_err(|e| e.to_string())?) } else { None });
     }
     let base = docs[0].as_ref().expect("the base document is always opened");
     let refs: Vec<&k_pdf::Document> = docs.iter().map(|d| d.as_ref().unwrap_or(base)).collect();
@@ -275,7 +278,10 @@ fn build_pdf(
         changes.replace.extend(form.replace);
         changes.added.extend(form.added);
     }
-    k_pdf::write_document_with_changes(&refs, pages, &changes, out).map_err(|e| e.to_string())
+    // A protected file stays protected (with the same passwords), but for
+    // printing.
+    let options = k_pdf::WriteOptions { decrypt, ..Default::default() };
+    k_pdf::write_document_with_options(&refs, pages, &changes, &options, out).map_err(|e| e.to_string())
 }
 
 /// Prints pages (as for [`save_pages`]): writes them to a temporary PDF,
@@ -293,7 +299,7 @@ fn print_job(
     let (file, bare) = (temp(""), temp("-bare"));
     let result = (|| {
         let mut out = std::io::BufWriter::new(std::fs::File::create(&file).map_err(|e| e.to_string())?);
-        build_pdf(files, pages, form_edits, text_changes, &mut out)?;
+        build_pdf(files, pages, form_edits, text_changes, true, &mut out)?;
         std::io::Write::flush(&mut out).map_err(|e| e.to_string())?;
         drop(out);
         let mut to_print = &file;
@@ -331,6 +337,8 @@ enum Asked {
     SaveImages(After),
     /// Where to save a compressed copy.
     Compress(k_pdf::compress::CompressOptions),
+    /// A photo or scan to take a signature from.
+    Signature,
 }
 
 /// Writes `target` through `write`: into a file next to it that is then
@@ -444,6 +452,10 @@ struct Viewer {
     /// Redact mode: marking areas to remove for good.
     redact_mode: bool,
     redact: redact::Redact,
+    /// Signing: choosing a signature, or placing it.
+    signing: signature::Signing,
+    /// Asking for a protected file's password.
+    password_prompt: Option<password::Prompt>,
     /// Making a form: placing fields on the pages.
     form_mode: bool,
     designer: fields::Designer,
@@ -573,6 +585,8 @@ impl Viewer {
             crop: crop::Crop::default(),
             redact_mode: false,
             redact: redact::Redact::default(),
+            signing: signature::Signing::default(),
+            password_prompt: None,
             form_mode: false,
             designer: fields::Designer::default(),
             untitled: None,
@@ -661,6 +675,7 @@ impl Viewer {
         self.set_rotate_mode(false);
         self.set_redact_mode(false);
         self.form_mode = false;
+        self.signing.cancel();
         let mut images = images::Images::cleaning(items);
         images.select_position(self.current_page);
         self.images = Some(images);
@@ -714,6 +729,7 @@ impl Viewer {
         self.rotate_mode = false;
         self.redact_mode = false;
         self.form_mode = false;
+        self.signing.cancel();
         self.show_info = false;
         self.delete_dialog = None;
         self.last_want = (Vec::new(), 0.0);
@@ -735,6 +751,7 @@ impl Viewer {
             self.form_mode = false;
         }
         self.designer.clear();
+        self.signing.cancel();
         if self.untitled.as_ref() != Some(&path) {
             self.untitled = None;
         }
@@ -746,6 +763,25 @@ impl Viewer {
         self.loading = Some(path.clone());
         self.error = None;
         self.pool.open(path);
+    }
+
+    /// The password dialog was answered: try the file again with the
+    /// password, or give up on it (going back to the file that was open).
+    fn password_answered(&mut self, answer: password::Answer) {
+        match answer {
+            password::Answer::Retry(path, password::Purpose::Open) => self.load(path),
+            password::Answer::Retry(path, password::Purpose::Insert(at)) => self.insert_files(vec![path], at),
+            password::Answer::Cancel(purpose) => {
+                self.password_prompt = None;
+                if purpose == password::Purpose::Open {
+                    self.startup = None;
+                    if let Some(doc) = &self.doc {
+                        let path = doc.path.clone();
+                        self.load(path);
+                    }
+                }
+            }
+        }
     }
 
     /// Whether pages were moved or inserted, or form fields filled in,
@@ -957,6 +993,7 @@ impl Viewer {
                 }
             }
             Asked::Compress(options) if self.doc.is_some() => self.compress_to(first, options),
+            Asked::Signature if self.doc.is_some() => self.signing.open_file(&self.ctx, &first),
             // The document was closed meanwhile.
             _ => {}
         }
@@ -1213,6 +1250,7 @@ impl Viewer {
             self.set_edit_mode(false);
             self.redact_mode = false;
             self.form_mode = false;
+            self.signing.cancel();
         }
         self.crop_mode = on;
         self.crop.clear();
@@ -1228,6 +1266,7 @@ impl Viewer {
             self.set_crop_mode(false);
             self.redact_mode = false;
             self.form_mode = false;
+            self.signing.cancel();
         }
         self.rotate_mode = on;
     }
@@ -1288,6 +1327,7 @@ impl Viewer {
             self.crop_mode = false;
             self.crop.clear();
             self.form_mode = false;
+            self.signing.cancel();
         }
         self.redact_mode = on;
         self.selection = None;
@@ -1365,6 +1405,50 @@ impl Viewer {
         }
     }
 
+    /// The Sign button: other tools are put away, then the signature
+    /// dialog opens.
+    fn start_signing(&mut self) {
+        if self.signing.is_active() {
+            self.signing.cancel();
+            return;
+        }
+        self.close_comment();
+        self.comments.placing = false;
+        self.set_edit_mode(false);
+        self.set_crop_mode(false);
+        self.rotate_mode = false;
+        self.redact_mode = false;
+        self.set_form_mode(false);
+        self.selection = None;
+        self.signing.begin();
+    }
+
+    fn signature_file_dialog(&mut self) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Choose a photo or scan of your signature")
+            .add_filter("Images and PDF documents", &[images::IMAGE_EXTENSIONS, &["pdf", "PDF"]].concat())
+            .add_filter("Images", images::IMAGE_EXTENSIONS)
+            .add_filter("PDF documents", &["pdf", "PDF"]);
+        if let Some(dir) = self.doc.as_ref().and_then(|d| d.path.parent()) {
+            dialog = dialog.set_directory(dir);
+        }
+        self.dialog.pick(&self.ctx, Asked::Signature, dialog);
+    }
+
+    fn handle_signature_action(&mut self, action: signature::Action) {
+        match action {
+            signature::Action::PickFile => self.signature_file_dialog(),
+            signature::Action::Place { page, rect, signature } => match self.editor.place_picture(page, &signature, rect) {
+                Ok(before) => {
+                    self.record(Undo::Text(before));
+                    self.content_changed();
+                    self.signing.placed();
+                }
+                Err(e) => self.error = Some(format!("Could not add the signature: {e}")),
+            },
+        }
+    }
+
     /// Form mode: placing, moving and changing form fields. The fields
     /// can't be filled in meanwhile (clicks place them instead).
     fn set_form_mode(&mut self, on: bool) {
@@ -1375,6 +1459,7 @@ impl Viewer {
             self.set_crop_mode(false);
             self.rotate_mode = false;
             self.redact_mode = false;
+            self.signing.cancel();
         } else {
             self.designer.clear();
         }
@@ -1433,6 +1518,7 @@ impl Viewer {
             self.crop.clear();
             self.redact_mode = false;
             self.form_mode = false;
+            self.signing.cancel();
             self.rotate_mode = false;
         }
         self.edit_mode = on;
@@ -1452,6 +1538,7 @@ impl Viewer {
             self.set_crop_mode(false);
             self.redact_mode = false;
             self.form_mode = false;
+            self.signing.cancel();
         }
         self.comments.placing = on;
     }
@@ -1666,10 +1753,6 @@ impl Viewer {
         if self.saving.is_some() {
             return;
         }
-        if doc.encrypted {
-            self.error = Some("Encrypted files can't be saved yet.".into());
-            return;
-        }
         let mut files = vec![doc.path.clone()];
         files.extend(self.added.iter().cloned());
         let pages: Vec<(usize, usize)> = self.order.iter().map(|&key| self.sources[key]).collect();
@@ -1733,6 +1816,7 @@ impl Viewer {
         self.set_crop_mode(false);
         self.redact_mode = false;
         self.form_mode = false;
+        self.signing.cancel();
         self.rotate_mode = false;
         self.comments.placing = false;
         self.selection = None;
@@ -1851,10 +1935,6 @@ impl Viewer {
     /// the background.
     fn start_print(&mut self, job: print::Job) {
         let Some(doc) = &self.doc else { return };
-        if doc.encrypted {
-            self.print.state = print::State::Done(Err("encrypted files can't be printed yet".into()));
-            return;
-        }
         let mut files = vec![doc.path.clone()];
         files.extend(self.added.iter().cloned());
         let pages: Vec<(usize, usize)> = job.positions.iter().map(|&pos| self.sources[self.order[pos]]).collect();
@@ -1882,10 +1962,6 @@ impl Viewer {
     fn start_compress(&mut self, options: k_pdf::compress::CompressOptions) {
         self.close_comment();
         let Some(doc) = &self.doc else { return };
-        if doc.encrypted {
-            self.error = Some("Encrypted files can't be compressed yet.".into());
-            return;
-        }
         let stem = doc.path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let mut dialog = rfd::FileDialog::new()
             .add_filter("PDF documents", &["pdf"])
@@ -1912,8 +1988,8 @@ impl Viewer {
             let run = || -> Result<(u64, k_pdf::compress::CompressReport), String> {
                 // The current state, as it would be saved, then compressed.
                 let mut current = Vec::new();
-                build_pdf(&files, &pages, &form_edits, &text_changes, &mut current)?;
-                let doc = k_pdf::Document::from_bytes(current).map_err(|e| e.to_string())?;
+                build_pdf(&files, &pages, &form_edits, &text_changes, false, &mut current)?;
+                let doc = password::from_bytes(current, &files[0]).map_err(|e| e.to_string())?;
                 let mut report = None;
                 write_atomically(&dest, |out| {
                     report = Some(k_pdf::compress::compress(&doc, &options, out).map_err(|e| e.to_string())?);
@@ -2066,6 +2142,7 @@ impl Viewer {
         for reply in self.pool.poll() {
             match reply {
                 Reply::Opened(mut info) => {
+                    self.password_prompt = None;
                     let page_count = info.page_sizes.len();
                     self.form = form::Form::new(std::mem::take(&mut info.fields));
                     let outline = std::mem::take(&mut info.outline);
@@ -2106,6 +2183,13 @@ impl Viewer {
                         self.set_form_mode(true);
                     }
                 }
+                Reply::NeedsPassword(path) => {
+                    self.loading = None;
+                    match &mut self.password_prompt {
+                        Some(prompt) if prompt.path() == path => prompt.rejected(ctx),
+                        _ => self.password_prompt = Some(password::Prompt::new(path, password::Purpose::Open)),
+                    }
+                }
                 Reply::OpenFailed(path, e) => {
                     self.loading = None;
                     self.startup = None;
@@ -2124,6 +2208,9 @@ impl Viewer {
                 }
                 Reply::Thumb { page, image, .. } => self.sidebar.insert(ctx, page, image),
                 Reply::Added { path, first, page_sizes } => {
+                    if self.password_prompt.as_ref().is_some_and(|p| p.path() == path) {
+                        self.password_prompt = None;
+                    }
                     self.added.push(path.clone());
                     let d = self.added.len();
                     let position = self.take_insert_position(&path);
@@ -2165,12 +2252,22 @@ impl Viewer {
                         }
                     }
                 }
-                Reply::AddFailed(path, e) => {
+                Reply::AddFailed(path, e, needs_password) => {
                     // Keep document numbers in step with the workers.
                     self.added.push(path.clone());
-                    self.take_insert_position(&path);
+                    let position = self.take_insert_position(&path);
                     self.replacing.retain(|(p, _)| *p != path);
-                    self.error = Some(format!("Could not insert {}: {e}", path.display()));
+                    if needs_password {
+                        match &mut self.password_prompt {
+                            Some(prompt) if prompt.path() == path => prompt.rejected(ctx),
+                            _ => {
+                                let at = position.unwrap_or(self.order.len());
+                                self.password_prompt = Some(password::Prompt::new(path, password::Purpose::Insert(at)));
+                            }
+                        }
+                    } else {
+                        self.error = Some(format!("Could not insert {}: {e}", path.display()));
+                    }
                 }
                 Reply::PageFailed { page, error } => {
                     self.failed.insert(page, error);
@@ -2376,6 +2473,16 @@ impl Viewer {
             return;
         }
 
+        if self.signing.is_placing() {
+            if pressed(Modifiers::NONE, Key::Escape) {
+                self.signing.cancel();
+            }
+            if pressed(Modifiers::NONE, Key::Enter)
+                && let Some(action) = self.signing.place()
+            {
+                self.handle_signature_action(action);
+            }
+        }
         // (Shift first: plain F5 would also match Shift+F5.)
         if pressed(Modifiers::SHIFT, Key::F5) {
             self.start_presentation(ctx, true);
@@ -2884,6 +2991,12 @@ impl Viewer {
             {
                 self.set_placing_note(!self.comments.placing);
             }
+            if icons::button(ui, Icon::Sign, labels.then_some("Sign"), self.signing.is_active(), true)
+                .on_hover_text("Add your signature: draw it, type it or take it from a photo, then drag it where it goes")
+                .clicked()
+            {
+                self.start_signing();
+            }
         });
         divider(ui);
         // Viewing aids (they don't change the document), then the tools
@@ -2959,6 +3072,10 @@ impl Viewer {
             if ui.button("Insert pages or images…").on_hover_text("Insert a PDF's pages, or images as pages, after this page").clicked() {
                 ui.close();
                 self.insert_file_dialog(self.current_page + 1);
+            }
+            if ui.button("Add a signature…").on_hover_text("Draw, type or take your signature from a photo, and put it on a page").clicked() {
+                ui.close();
+                self.start_signing();
             }
             if ui
                 .button("Clean up scanned pages…")
@@ -3179,8 +3296,12 @@ impl Viewer {
                 if doc.repaired {
                     ui.colored_label(p.warning, "damaged file (repaired)");
                 }
-                if doc.encrypted {
-                    ui.colored_label(p.warning, "encrypted — not supported yet");
+                if let Some(how) = &doc.protection {
+                    let tip = format!("Protected by a password (encrypted with {how}). Saved copies keep the password.");
+                    ui.label(egui::RichText::new("Protected").color(p.weak)).on_hover_text(&tip);
+                    let (rect, response) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
+                    icons::paint(ui.painter(), rect, Icon::Lock, p.weak);
+                    response.on_hover_text(tip);
                 }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| self.status_message(ui));
             });
@@ -3243,6 +3364,9 @@ impl Viewer {
             ("PDF version".into(), doc.version.clone()),
             ("Pages".into(), self.order.len().to_string()),
         ];
+        if let Some(how) = &doc.protection {
+            rows.push(("Protection".into(), format!("Password ({how})")));
+        }
         if let Some(size) = self.order.get(self.current_page).and_then(|&p| doc.page_sizes.get(p)) {
             rows.push((
                 "Page size".into(),
@@ -3511,7 +3635,17 @@ impl Viewer {
 
             // Mouse interaction over the visible area: text selection, or
             // in edit mode, editing.
-            if self.crop_mode {
+            if self.signing.is_placing() {
+                let pages: Vec<(usize, Rect)> = visible
+                    .iter()
+                    .filter_map(|&(key, rect)| match self.sources.get(key) {
+                        Some(&(0, page)) => Some((page, rect)),
+                        _ => None,
+                    })
+                    .collect();
+                let start = self.order.get(current).and_then(|&k| self.sources.get(k)).and_then(|&(d, p)| (d == 0).then_some(p));
+                self.signing.show_pages(ui, &pages, zoom, start);
+            } else if self.crop_mode {
                 for (&(key, rect), &position) in visible.iter().zip(&visible_positions) {
                     if let Some(&(0, page)) = self.sources.get(key) {
                         self.crop.show_page(ui, page, position, rect, zoom);
@@ -3957,10 +4091,21 @@ impl eframe::App for Viewer {
                     self.welcome(ui);
                 }
             });
+        if let Some(answer) = self.password_prompt.as_mut().and_then(|p| p.show(&ctx)) {
+            self.password_answered(answer);
+        }
         // The document's tools, unless images to insert are shown instead.
         let pdf = self.doc.is_some() && self.images.is_none();
-        if pdf && !self.crop_mode && !self.redact_mode && !self.edit_mode {
+        if pdf && !self.crop_mode && !self.redact_mode && !self.edit_mode && !self.signing.is_placing() {
             self.comment_overlays(&ctx, &anchors);
+        }
+        if pdf {
+            if let Some(action) = self.signing.dialog(&ctx, self.view_rect) {
+                self.handle_signature_action(action);
+            }
+            if let Some(action) = self.signing.panel(&ctx, self.view_rect) {
+                self.handle_signature_action(action);
+            }
         }
         if self.crop_mode
             && pdf

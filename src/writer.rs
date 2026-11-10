@@ -30,7 +30,8 @@ use crate::xref::XrefEntry;
 /// [`Document::pages`]). `order` may leave pages out (they are dropped) or
 /// repeat one.
 ///
-/// Encrypted documents can't be saved yet.
+/// A password-protected document is saved with the same protection (see
+/// [`write_document_with_options`]).
 pub fn write_with_page_order(doc: &Document, order: &[usize], out: impl Write) -> Result<()> {
     let pages: Vec<(usize, usize)> = order.iter().map(|&p| (0, p)).collect();
     write_document(&[doc], &pages, out)
@@ -67,6 +68,9 @@ pub struct WriteOptions {
     /// The version to declare in the file header, instead of the newest of
     /// the documents' own.
     pub version: Option<String>,
+    /// Save a password-protected document without its password (it is
+    /// kept otherwise).
+    pub decrypt: bool,
 }
 
 /// [`write_document`] with `changes` (e.g. from [`crate::fill_form`])
@@ -89,9 +93,6 @@ pub fn write_document_with_options(
     out: impl Write,
 ) -> Result<()> {
     let Some(&doc) = docs.first() else { return Err(Error::Object("no document to write".into())) };
-    if docs.iter().any(|d| d.is_encrypted()) {
-        return Err(Error::Encrypted);
-    }
     let all_pages: Vec<Vec<Page>> = docs.iter().map(|d| d.pages()).collect::<Result<_>>()?;
     for &(d, p) in pages {
         let Some(list) = all_pages.get(d) else {
@@ -209,6 +210,11 @@ pub fn write_document_with_options(
     // original most likely was; older versions get a classic xref table.
     let compress = version_tuple(&version) >= (1, 5);
     let mut sink = Sink::new(out, &version, compress, options.max_compression)?;
+    // A password-protected base document stays protected: encrypted again
+    // with its key, with its encryption dictionary and file ID, so the
+    // same passwords open it with the same permissions. (Pages from other
+    // documents were decrypted as they were read.)
+    sink.crypt = if options.decrypt { None } else { doc.crypt().cloned() };
 
     let mut changed: HashMap<u32, (ObjRef, Object)> = changes.replace.clone();
     for (num, entry) in &entries {
@@ -403,13 +409,16 @@ struct Sink<W: Write> {
     compress: bool,
     /// Compress as tightly as possible.
     max: bool,
+    /// Encrypts each object written directly (object streams' members are
+    /// encrypted with their stream).
+    crypt: Option<crate::crypt::Crypt>,
 }
 
 impl<W: Write> Sink<W> {
     fn new(out: W, version: &str, compress: bool, max: bool) -> io::Result<Self> {
         let mut w = CountingWriter { inner: io::BufWriter::new(out), written: 0 };
         w.write_all(format!("%PDF-{version}\n%\u{e2}\u{e3}\u{cf}\u{d3}\n").as_bytes())?;
-        Ok(Sink { w, entries: HashMap::new(), batch: Vec::new(), compress, max })
+        Ok(Sink { w, entries: HashMap::new(), batch: Vec::new(), compress, max, crypt: None })
     }
 
     fn add(&mut self, r: ObjRef, obj: &Object, new_ref: &mut impl FnMut() -> ObjRef) -> io::Result<()> {
@@ -429,6 +438,11 @@ impl<W: Write> Sink<W> {
 
     fn write_direct(&mut self, r: ObjRef, obj: &Object) -> io::Result<()> {
         self.entries.insert(r.num, Entry::InFile { generation: r.generation, offset: self.w.written });
+        if let Some(crypt) = &self.crypt {
+            let mut sealed = obj.clone();
+            crypt.encrypt_object(r.num, r.generation, &mut sealed);
+            return write_object(&mut self.w, r, &sealed);
+        }
         write_object(&mut self.w, r, obj)
     }
 
@@ -463,6 +477,13 @@ impl<W: Write> Sink<W> {
     /// stream) with `trailer`'s entries.
     fn finish(mut self, mut trailer: Dictionary, new_ref: &mut impl FnMut() -> ObjRef) -> Result<()> {
         self.flush_batch(new_ref)?;
+        // The encryption dictionary, itself not encrypted.
+        if let Some(crypt) = self.crypt.take() {
+            let r = new_ref();
+            self.entries.insert(r.num, Entry::InFile { generation: 0, offset: self.w.written });
+            write_object(&mut self.w, r, &Object::Dictionary(crypt.dict))?;
+            trailer.set(b"Encrypt".to_vec(), Object::Reference(r));
+        }
         let xref_ref = new_ref();
         // Drop /Info if it wasn't written.
         if let Some(Object::Reference(info)) = trailer.get(b"Info")

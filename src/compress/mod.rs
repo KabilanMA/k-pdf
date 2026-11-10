@@ -34,7 +34,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 
 use crate::document::Document;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::object::{Dictionary, ObjRef, Object, Stream};
 use crate::writer::{Changes, WriteOptions};
 use crate::xref::XrefEntry;
@@ -75,9 +75,6 @@ const BROTLI_EXTENSION_URL: &str = "https://pdfa.org/resource/extension-brotli";
 
 /// Writes `doc` compressed losslessly to `out` (see the module docs).
 pub fn compress(doc: &Document, options: &CompressOptions, out: impl Write) -> Result<CompressReport> {
-    if doc.is_encrypted() {
-        return Err(Error::Encrypted);
-    }
     let mut report = CompressReport::default();
     let entries = doc.xref_entries();
     let generation = |e: &XrefEntry| if let XrefEntry::InFile { generation, .. } = e { *generation } else { 0 };
@@ -129,7 +126,7 @@ pub fn compress(doc: &Document, options: &CompressOptions, out: impl Write) -> R
     }
 
     // 4. Brotli files declare PDF 2.0 and the extension.
-    let mut write_options = WriteOptions { max_compression: true, version: None };
+    let mut write_options = WriteOptions { max_compression: true, ..WriteOptions::default() };
     if report.brotli_streams > 0 {
         let catalog_ref = doc.trailer().get(b"Root").and_then(Object::as_reference);
         if let Some(cr) = catalog_ref {

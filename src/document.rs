@@ -139,6 +139,11 @@ pub struct Document {
     /// Edited and added objects (not saved yet), seen in place of the
     /// file's own; see [`Document::set_overlay`].
     overlay: RefCell<HashMap<u32, Object>>,
+    /// For a password-protected file: its key, to decrypt objects as they
+    /// are read; and the encryption dictionary's object number (whose
+    /// strings aren't encrypted).
+    crypt: Option<Box<crate::crypt::Crypt>>,
+    crypt_num: Option<u32>,
 }
 
 impl Document {
@@ -147,16 +152,27 @@ impl Document {
     /// On Windows, a file that is mapped can't be replaced (as saving over
     /// an open document does), so there it is read into memory instead,
     /// once: documents open on the same unchanged file share it.
+    ///
+    /// A password-protected file opens if its user password is empty (it
+    /// only restricts what may be done with it); otherwise this fails with
+    /// [`Error::PasswordNeeded`]: see [`Document::open_with_password`].
     pub fn open(path: impl AsRef<Path>) -> Result<Document> {
+        Self::open_with_password(path, "")
+    }
+
+    /// Opens a password-protected PDF with its user or owner password
+    /// (unprotected files open whatever it is). Fails with
+    /// [`Error::WrongPassword`] when it doesn't open the file.
+    pub fn open_with_password(path: impl AsRef<Path>, password: &str) -> Result<Document> {
         #[cfg(windows)]
-        let document = Self::from_source(Source::Shared(shared_file(path.as_ref())?));
+        let document = Self::from_source(Source::Shared(shared_file(path.as_ref())?), password);
         #[cfg(not(windows))]
-        let document = Self::open_mapped(path.as_ref());
+        let document = Self::open_mapped(path.as_ref(), password);
         document
     }
 
     #[cfg(not(windows))]
-    fn open_mapped(path: &Path) -> Result<Document> {
+    fn open_mapped(path: &Path, password: &str) -> Result<Document> {
         let file = File::open(path)?;
         if file.metadata()?.len() == 0 {
             return Err(Error::parse(0, "file is empty"));
@@ -164,15 +180,20 @@ impl Document {
         // SAFETY: the mapping is read-only. As with any mmap, modifying the
         // file from another process while it is open is not supported.
         let map = unsafe { memmap2::Mmap::map(&file)? };
-        Self::from_source(Source::Mapped(map))
+        Self::from_source(Source::Mapped(map), password)
     }
 
     /// Reads a PDF from an in-memory buffer.
     pub fn from_bytes(data: Vec<u8>) -> Result<Document> {
-        Self::from_source(Source::Owned(data))
+        Self::from_source(Source::Owned(data), "")
     }
 
-    fn from_source(data: Source) -> Result<Document> {
+    /// [`Document::from_bytes`] for a password-protected PDF.
+    pub fn from_bytes_with_password(data: Vec<u8>, password: &str) -> Result<Document> {
+        Self::from_source(Source::Owned(data), password)
+    }
+
+    fn from_source(data: Source, password: &str) -> Result<Document> {
         // The header should be at byte 0, but readers accept it anywhere in
         // the first 1024 bytes.
         let head = &data[..data.len().min(1024)];
@@ -192,7 +213,7 @@ impl Document {
             Ok(t) => (t, false),
             Err(_) => (xref::reconstruct(&data)?, true),
         };
-        let doc = Document {
+        let mut doc = Document {
             data,
             header_offset,
             header_version,
@@ -201,13 +222,15 @@ impl Document {
             objstm: RefCell::new(Vec::new()),
             depth: Cell::new(0),
             overlay: RefCell::new(HashMap::new()),
+            crypt: None,
+            crypt_num: None,
         };
+        doc.unlock(password)?;
 
         // A readable catalog is the minimum for a usable document. If the
         // xref looked fine but leads nowhere, rebuild it from scratch.
         match doc.catalog() {
             Ok(_) => {}
-            Err(Error::Encrypted) => return Err(Error::Encrypted),
             Err(_) if !doc.reconstructed.get() => {
                 doc.reconstruct()?;
                 doc.catalog()?;
@@ -215,6 +238,57 @@ impl Document {
             Err(e) => return Err(e),
         }
         Ok(doc)
+    }
+
+    /// For an encrypted file: works out its key from `password` (§7.6),
+    /// so objects are decrypted as they are read.
+    fn unlock(&mut self, password: &str) -> Result<()> {
+        let trailer = self.trailer();
+        let Some(encrypt) = trailer.get(b"Encrypt").cloned() else { return Ok(()) };
+        // The dictionary, with its entries (and its crypt filters')
+        // resolved: they may be indirect.
+        let mut dict = match self.resolve(&encrypt)? {
+            Object::Dictionary(d) => d,
+            _ => return Err(Error::Object("the encryption dictionary is missing".into())),
+        };
+        let resolve_all = |d: &Dictionary| {
+            let mut out = Dictionary::new();
+            for (k, v) in d.iter() {
+                out.set(k.to_vec(), self.resolve(v).unwrap_or(Object::Null));
+            }
+            out
+        };
+        dict = resolve_all(&dict);
+        if let Some(Object::Dictionary(cf)) = dict.get(b"CF").cloned() {
+            let mut filters = Dictionary::new();
+            for (k, v) in cf.iter() {
+                let f = match self.resolve(v) {
+                    Ok(Object::Dictionary(f)) => Object::Dictionary(resolve_all(&f)),
+                    other => other.unwrap_or(Object::Null),
+                };
+                filters.set(k.to_vec(), f);
+            }
+            dict.set(b"CF".to_vec(), Object::Dictionary(filters));
+        }
+        let id = match self.get_resolved(&trailer, b"ID") {
+            Ok(Object::Array(ids)) => ids.first().and_then(|i| self.resolve(i).ok()).and_then(|i| i.as_string().map(<[u8]>::to_vec)),
+            _ => None,
+        };
+        let crypt = crate::crypt::Crypt::unlock(&dict, id.as_deref().unwrap_or_default(), password)?;
+        self.crypt = Some(Box::new(crypt));
+        self.crypt_num = encrypt.as_reference().map(|r| r.num);
+        Ok(())
+    }
+
+    /// How the file is encrypted ("AES-256", "RC4, 128-bit", …), if it is.
+    pub fn encryption(&self) -> Option<String> {
+        self.crypt.as_ref().map(|c| c.describe())
+    }
+
+    /// The file's key and encryption dictionary, to save it encrypted the
+    /// same way.
+    pub(crate) fn crypt(&self) -> Option<&crate::crypt::Crypt> {
+        self.crypt.as_deref()
     }
 
     /// Raw file bytes.
@@ -330,7 +404,7 @@ impl Document {
         match result {
             Ok(o) => Ok(o),
             // A bad offset usually means a damaged xref: rebuild once, retry.
-            Err(e) if !matches!(e, Error::Encrypted) && !self.reconstructed.get() => {
+            Err(e) if !self.reconstructed.get() => {
                 self.reconstruct()?;
                 self.get_object_inner(r)
             }
@@ -346,7 +420,16 @@ impl Document {
                 continue;
             }
             match Parser::new(&self.data, off).parse_indirect(&resolve_length) {
-                Ok((id, obj)) if id.num == num => return Ok(obj),
+                Ok((id, mut obj)) if id.num == num => {
+                    // Objects in object streams were decrypted with
+                    // their stream.
+                    if let Some(crypt) = &self.crypt
+                        && self.crypt_num != Some(num)
+                    {
+                        crypt.decrypt_object(num, id.generation, &mut obj);
+                    }
+                    return Ok(obj);
+                }
                 Ok((id, _)) => {
                     last_err = Some(Error::Object(format!("expected object {num} at offset {off}, found {}", id.num)))
                 }
@@ -488,9 +571,6 @@ impl Document {
     }
 
     fn decode_stream_with(&self, stream: &Stream, strict: bool) -> Result<filters::Decoded> {
-        if self.is_encrypted() {
-            return Err(Error::Encrypted);
-        }
         // Filter parameters may be indirect; resolve them one level deep.
         let mut dict = Dictionary::new();
         for key in [&b"Filter"[..], b"DecodeParms", b"F", b"DP"] {
@@ -533,9 +613,6 @@ impl Document {
         let Some(info) = self.get_dict(&trailer, b"Info") else {
             return Ok(Metadata::default());
         };
-        if self.is_encrypted() {
-            return Err(Error::Encrypted); // strings would be ciphertext
-        }
         let text = |key: &[u8]| -> Option<String> {
             match self.get_resolved(&info, key).ok()? {
                 Object::String(s) => Some(decode_text_string(&s)),

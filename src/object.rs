@@ -70,6 +70,10 @@ impl Dictionary {
         self.entries.iter().map(|(k, v)| (k.as_slice(), v))
     }
 
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&[u8], &mut Object)> {
+        self.entries.iter_mut().map(|(k, v)| (k.as_slice(), v))
+    }
+
     /// The value of `/Type`, if it is a name.
     pub fn type_name(&self) -> Option<&[u8]> {
         self.get(b"Type").and_then(Object::as_name)

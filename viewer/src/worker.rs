@@ -60,7 +60,8 @@ pub struct DocInfo {
     /// Displayed page sizes in points (after rotation).
     pub page_sizes: Vec<egui::Vec2>,
     pub metadata: Vec<(&'static str, String)>,
-    pub encrypted: bool,
+    /// How a password-protected file is encrypted ("AES-256", …).
+    pub protection: Option<String>,
     pub repaired: bool,
     /// Form fields, filled in by the viewer.
     pub fields: Vec<k_pdf::FormField>,
@@ -71,6 +72,9 @@ pub struct DocInfo {
 pub enum Reply {
     Opened(Box<DocInfo>),
     OpenFailed(PathBuf, String),
+    /// The file is protected and the password given (if any) doesn't open
+    /// it.
+    NeedsPassword(PathBuf),
     /// `dark`: rendered as a dark page (see [`Pool::set_dark_pages`]).
     Page { page: usize, scale: f32, dark: bool, image: egui::ColorImage },
     PageFailed { page: usize, error: String },
@@ -86,7 +90,8 @@ pub enum Reply {
     /// A document added with [`Pool::add_document`] is open; its pages have
     /// keys `first..first + page_sizes.len()`.
     Added { path: PathBuf, first: usize, page_sizes: Vec<egui::Vec2> },
-    AddFailed(PathBuf, String),
+    /// `true`: for want of the right password.
+    AddFailed(PathBuf, String, bool),
 }
 
 struct State {
@@ -291,8 +296,12 @@ impl Drop for Pool {
 /// An open document with its pages; `None` if it couldn't be opened.
 type Opened = Option<(Document, Vec<k_pdf::Page>)>;
 
-fn open_document(path: &PathBuf) -> k_pdf::Result<(Document, Vec<k_pdf::Page>)> {
-    let doc = Document::open(path)?;
+fn needs_password(e: &k_pdf::Error) -> bool {
+    matches!(e, k_pdf::Error::PasswordNeeded | k_pdf::Error::WrongPassword)
+}
+
+fn open_document(path: &std::path::Path) -> k_pdf::Result<(Document, Vec<k_pdf::Page>)> {
+    let doc = crate::password::open(path)?;
     let pages = doc.pages()?;
     Ok((doc, pages))
 }
@@ -321,7 +330,7 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
             Ok(v) => v,
             Err(e) => {
                 if index == 0 {
-                    send(id, Reply::OpenFailed(path, e.to_string()));
+                    send(id, if needs_password(&e) { Reply::NeedsPassword(path) } else { Reply::OpenFailed(path, e.to_string()) });
                 }
                 continue;
             }
@@ -352,10 +361,7 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
             let added: Vec<PathBuf> = shared.state.lock().unwrap().added.iter().skip(docs.len() - 1).cloned().collect();
             for path in added {
                 let first = page_total(&docs);
-                let opened = open_document(&path).and_then(|d| {
-                    if d.0.is_encrypted() { Err(k_pdf::Error::Encrypted) } else { Ok(d) }
-                });
-                match opened {
+                match open_document(&path) {
                     Ok((doc, pages)) => {
                         if index == 0 {
                             let page_sizes = page_sizes(&doc, &pages);
@@ -365,7 +371,7 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                     }
                     Err(e) => {
                         if index == 0 {
-                            send(id, Reply::AddFailed(path, e.to_string()));
+                            send(id, Reply::AddFailed(path, e.to_string(), needs_password(&e)));
                         }
                         docs.push(None);
                     }
@@ -626,7 +632,7 @@ fn doc_info(doc: &Document, pages: &[k_pdf::Page], path: PathBuf) -> DocInfo {
         version: doc.version(),
         page_sizes: page_sizes(doc, pages),
         metadata: metadata(doc),
-        encrypted: doc.is_encrypted(),
+        protection: doc.encryption(),
         repaired: doc.was_repaired(),
         fields: k_pdf::form_fields(doc).unwrap_or_default(),
         outline: k_pdf::outline(doc, pages),

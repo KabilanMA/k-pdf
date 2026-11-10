@@ -335,15 +335,20 @@ fn form_xobject_text_and_inline_image() {
 }
 
 #[test]
-fn encrypted_streams_report_error() {
+fn a_password_is_asked_for() {
+    // The check values match no password (not even the empty one).
     let mut b = Builder::new("1.4");
     hello_world_objects(&mut b, HELLO, "");
     b.obj(6, "<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>");
-    let doc = Document::from_bytes(b.finish("/Root 1 0 R /Encrypt 6 0 R")).unwrap();
-    assert!(doc.is_encrypted());
-    assert_eq!(doc.page_count().unwrap(), 1); // structure is still readable
-    let page = &doc.pages().unwrap()[0];
-    assert!(matches!(TextExtractor::new(&doc).extract_page(page), Err(Error::Encrypted)));
+    let data = b.finish("/Root 1 0 R /Encrypt 6 0 R");
+    assert!(matches!(Document::from_bytes(data.clone()), Err(Error::PasswordNeeded)));
+    assert!(matches!(Document::from_bytes_with_password(data, "guess"), Err(Error::WrongPassword)));
+
+    // Encrypted for certain people (with certificates), not with a password.
+    let mut b = Builder::new("1.4");
+    hello_world_objects(&mut b, HELLO, "");
+    b.obj(6, "<< /Filter /Adobe.PubSec /V 4 /R 4 >>");
+    assert!(matches!(Document::from_bytes(b.finish("/Root 1 0 R /Encrypt 6 0 R")), Err(Error::Encrypted(_))));
 }
 
 #[test]

@@ -30,12 +30,16 @@ mod clean;
 mod detect;
 mod formats;
 mod png;
+mod signature;
 
 use std::io::Write;
 
 use crate::error::{Error, Result};
 
 pub use detect::find_page;
+pub use signature::{lift_signature, Ink, Signature};
+#[cfg(feature = "render")]
+pub use signature::{drawn_signature, typed_signature};
 
 /// The page's corners in a photo, in pixels (x right, y down): top left,
 /// top right, bottom right, bottom left.
