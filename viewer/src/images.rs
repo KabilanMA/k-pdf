@@ -502,9 +502,10 @@ impl Images {
     /// Reads `items` in the background, one after another, and puts them at
     /// position `at` in that order.
     fn read_items(&mut self, items: Vec<Item>, at: usize) {
-        // (Pages of the open document count as one file.)
-        let files = if items.iter().any(|i| i.key.is_some()) { 1 } else { items.len() };
-        self.loading += files;
+        // (Pages of the open document count as one file, done once they
+        // have all been read, however many there are.)
+        let document = items.iter().any(|i| i.key.is_some());
+        self.loading += if document { 1 } else { items.len() };
         let (ids, tx) = (self.next_id.clone(), self.tx.clone());
         std::thread::spawn(move || {
             let mut at = at;
@@ -564,7 +565,7 @@ impl Images {
                     return; // the images were closed
                 }
             }
-            if files == 1 && items.len() > 1 && !failed {
+            if document && !failed {
                 tx.send(Msg::FileDone).ok();
             }
         });
@@ -1731,7 +1732,12 @@ impl TempFiles {
     }
 
     pub fn next(&mut self) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("k-pdf-images-{}-{}.pdf", std::process::id(), self.0.len() + 1));
+        self.next_named("images")
+    }
+
+    /// A temporary PDF for `what` ("images", "form"…).
+    pub fn next_named(&mut self, what: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("k-pdf-{what}-{}-{}.pdf", std::process::id(), self.0.len() + 1));
         self.0.push(path.clone());
         path
     }

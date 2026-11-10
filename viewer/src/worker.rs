@@ -330,9 +330,6 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
         if index == 0 {
             send(id, Reply::Opened(Box::new(doc_info(&main.0, &main.1, path))));
         }
-        // The main document's form fields are drawn by the viewer as
-        // editable widgets, so its page renders leave their contents out.
-        let has_form = k_pdf::form_fields(&main.0).is_ok_and(|f| !f.is_empty());
         let mut docs: Vec<Opened> = vec![Some(main)];
         let mut overlay_version = u64::MAX;
 
@@ -419,7 +416,11 @@ fn worker(index: usize, shared: &Shared, replies: &Sender<(u64, Reply)>, ctx: &e
                 let reply = match (&docs[d], &mut tools[d]) {
                     (Some((doc, pages)), Some((renderer, extractor))) => {
                         // Thumbnails keep the fields as saved in the file.
-                        renderer.set_hide_form_fields(has_form && d == 0 && matches!(job, Job::Render { .. }));
+                        // The main document's form fields are drawn by the
+                        // viewer as editable widgets (made later too, in
+                        // form mode), so its page renders leave their
+                        // contents out.
+                        renderer.set_hide_form_fields(d == 0 && matches!(job, Job::Render { .. }));
                         renderer.set_dark_pages(dark);
                         run_job(job.with_page(key - starts[d]), doc, pages, renderer, extractor, dark, query.as_deref())
                             .map(|r| r.with_page_offset(starts[d]))

@@ -13,7 +13,8 @@ A fast, lightweight PDF viewer and editor for Linux, Windows and macOS.
 - **Jump between sections** — the sidebar lists a document's headings and subheadings and highlights the one you're reading. Long documents open on it, short ones on the page thumbnails; one click switches.
 - **Edit text** — click any paragraph and type. The text keeps its font, size and color, and you can change those as in a word processor.
 - **Highlight and comment** — select text to highlight it in one of four colors or comment on it, or drop a note anywhere on a page. The sidebar lists all the comments. They're saved as standard PDF comments, so other PDF readers show them too.
-- **Fill in forms** — text fields, check boxes, radio buttons and lists.
+- **Fill in forms** — text fields, check boxes, radio buttons and lists. Fields you can fill in are shown in blue (a red border means it must be filled in); **Highlight fillable fields** in the ⋯ menu turns this off.
+- **Create forms** — start from a blank page, or a PDF you have such as a paper form, and add text boxes, check boxes and drop-down lists that people can fill in. Drag to place a field, then move, resize, rename or delete it; other PDF readers can fill in the forms too.
 - **Rearrange pages** — drag thumbnails to reorder pages, insert another PDF between any two pages, or delete pages: one with the bin button on its thumbnail, or a list like "2, 5-7" with **Delete pages…** in the ⋯ menu.
 - **Turn images into a PDF** — open JPEG, PNG, GIF, BMP, TIFF or WebP images just like a PDF: each image is a page, with thumbnails in the sidebar to add more images, reorder them or remove them. For each page, choose how it looks: **As is** keeps the image unchanged, while the scan looks turn a phone photo of a document into a clean scanned page. k-pdf finds the page in the photo, flattens it, straightens slanted text and removes shadows, so the paper is white and the writing crisp (**Color scan**, **Gray scan** or **Black & white**; **Cropped** only cuts the page out). Drag the corners if the page wasn't found exactly, then **Save PDF** to put all the pages in one PDF, and **Open PDF** to read the result. You can add PDFs too: their pages join the others, kept exactly as they are (text stays selectable) or cleaned up like a scan. Images can also be added to a PDF you have open (**Insert pages or images…** in the ⋯ menu, or the **+** between thumbnails): they open in the same editor first, so you can scan and crop each one, then **Insert** adds them as pages.
 - **Clean up handwritten and scanned PDFs** — the sparkle button in the toolbar (or **Clean up scanned pages…** in the ⋯ menu) shows the document's pages as they are; pick a look for the ones that need it (**Apply to…** gives several pages the same look, like "1, 3-5" or all of them) and click **Apply**. The cleaned pages replace the old ones and you're back in the document with every other tool; Ctrl+Z undoes it. A blotchy, faint or grayish scan becomes clear and crisp. With **Handwriting** on, light pen and pencil strokes are darkened so every word is readable, the paper turns white, and a notebook's ruled lines stay light (and are left out entirely in black and white).
@@ -43,7 +44,7 @@ The warnings on Windows and macOS appear because the app isn't signed with a pai
 
 ## Using k-pdf
 
-Open a PDF with the **Open** button, by dropping a file onto the window, or with **Ctrl+O** (**Cmd+O** on a Mac). Opening or dropping images shows them as the pages of a new PDF (see above). The toolbar has the editing tools: **Edit text**, **Crop**, **Rotate**, **Redact** and **Comment**. The **⋯** menu has **Save as**, **Insert pages or images**, **Print**, **Compress**, document info and the theme. Page navigation and zoom are at the bottom of the window.
+The start screen offers two things: **Open a PDF or images**, and **Create a form** (on a **Blank page**, or **From a PDF…**). You can also open a PDF with the **Open** button, by dropping a file onto the window, or with **Ctrl+O** (**Cmd+O** on a Mac). Opening or dropping images shows them as the pages of a new PDF (see above). The toolbar has the editing tools: **Edit text**, **Crop**, **Rotate**, **Redact**, **Form** and **Comment**. The **⋯** menu has **Save as**, **Insert pages or images**, **Print**, **Compress**, document info and the theme. Page navigation and zoom are at the bottom of the window, with buttons to fit the page's width or the whole page in the window.
 
 | Shortcut | Action |
 |---|---|
@@ -62,6 +63,7 @@ Open a PDF with the **Open** button, by dropping a file onto the window, or with
 | Ctrl+R / Ctrl+Shift+R | Rotate the current page right / left |
 | Ctrl+C | Copy selected text |
 | Ctrl + mouse wheel, Ctrl +/- | Zoom |
+| Ctrl+0 / Ctrl+9 | Fit width / fit the whole page |
 | Double-click a link | Go to that part of the document |
 | Ctrl+click a web link | Open it in your browser |
 
@@ -79,6 +81,8 @@ k-pdf-cli images  album.pdf photo1.jpg drawing.png
 k-pdf-cli scan    receipts.pdf photo1.jpg photo2.jpg --mode bw
 k-pdf-cli scan    clean-notes.pdf notes.pdf --handwriting
 k-pdf-cli search  scanned.pdf "invoice number"
+k-pdf-cli blank   form.pdf a4
+k-pdf-cli add-field form.pdf signup.pdf text "Full name" 1 72 100 400 124 --required
 ```
 
 Run `k-pdf-cli --help` for everything it can do.

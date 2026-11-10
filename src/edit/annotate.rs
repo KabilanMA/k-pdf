@@ -310,7 +310,7 @@ pub fn pdf_date_now() -> String {
 // ----------------------------------------------------------------------
 
 /// Records a changed object: in place if it is new, else as a replacement.
-fn store(changes: &mut Changes, id: ObjRef, obj: Object) {
+pub(super) fn store(changes: &mut Changes, id: ObjRef, obj: Object) {
     match changes.added.iter_mut().find(|(r, _)| *r == id) {
         Some(slot) => slot.1 = obj,
         None => {
@@ -344,7 +344,7 @@ fn markup(subtype: &[u8], rect: [f64; 4], color: [u8; 3], text: &str, author: &s
 }
 
 /// A form XObject drawing `content` over `bbox`.
-fn appearance(bbox: [f64; 4], resources: Dictionary, content: String) -> Stream {
+pub(super) fn appearance(bbox: [f64; 4], resources: Dictionary, content: String) -> Stream {
     let mut d = Dictionary::new();
     d.set(b"Type".to_vec(), name(b"XObject"));
     d.set(b"Subtype".to_vec(), name(b"Form"));
@@ -377,7 +377,7 @@ fn add_annotation(doc: &Document, p: &Page, mut dict: Dictionary, ap: Stream, ch
 }
 
 /// The page's `/Annots` array, as stored.
-fn page_annots(doc: &Document, p: &Page) -> Result<Vec<Object>> {
+pub(super) fn page_annots(doc: &Document, p: &Page) -> Result<Vec<Object>> {
     let raw = doc.get_object(p.id)?;
     let raw = raw.as_dict().ok_or_else(|| Error::Object("the page is not a dictionary".into()))?;
     Ok(match raw.get(b"Annots") {
@@ -388,7 +388,7 @@ fn page_annots(doc: &Document, p: &Page) -> Result<Vec<Object>> {
 
 /// Stores the page's new `/Annots`: in the array object if it is one of
 /// its own, else in the page.
-fn set_page_annots(doc: &Document, p: &Page, annots: Vec<Object>, changes: &mut Changes) -> Result<()> {
+pub(super) fn set_page_annots(doc: &Document, p: &Page, annots: Vec<Object>, changes: &mut Changes) -> Result<()> {
     let raw = doc.get_object(p.id)?;
     let mut raw = raw.as_dict().cloned().ok_or_else(|| Error::Object("the page is not a dictionary".into()))?;
     match raw.get(b"Annots") {
@@ -416,7 +416,7 @@ fn color_of(doc: &Document, dict: &Dictionary) -> Option<[u8; 3]> {
 }
 
 /// Display point → page space.
-fn to_user(display: &[f64; 6]) -> impl Fn(f32, f32) -> (f64, f64) + use<> {
+pub(super) fn to_user(display: &[f64; 6]) -> impl Fn(f32, f32) -> (f64, f64) + use<> {
     let [a, b, c, d, e, f] = *display;
     let det = a * d - b * c;
     let det = if det.abs() < 1e-12 { 1.0 } else { det };
@@ -435,19 +435,19 @@ fn display_rect(m: &[f64; 6], points: &[(f64, f64)]) -> [f32; 4] {
 }
 
 /// `[min x, min y, max x, max y]` of some points.
-fn bounds(points: impl Iterator<Item = (f64, f64)>) -> [f64; 4] {
+pub(super) fn bounds(points: impl Iterator<Item = (f64, f64)>) -> [f64; 4] {
     points.fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |[l, b, r, t], (x, y)| [l.min(x), b.min(y), r.max(x), t.max(y)])
 }
 
-fn name(n: &[u8]) -> Object {
+pub(super) fn name(n: &[u8]) -> Object {
     Object::Name(n.to_vec())
 }
 
-fn real(v: f64) -> Object {
+pub(super) fn real(v: f64) -> Object {
     Object::Real((v * 1000.0).round() / 1000.0)
 }
 
-fn num(v: f64) -> String {
+pub(super) fn num(v: f64) -> String {
     let s = format!("{v:.3}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.to_string() }

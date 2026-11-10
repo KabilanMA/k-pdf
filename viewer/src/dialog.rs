@@ -37,8 +37,13 @@ impl<T> Dialog<T> {
         self.show(ctx, purpose, move || dialog.pick_files());
     }
 
-    /// Asks where to save, for `purpose`.
+    /// Asks where to save, for `purpose`. (Scripted runs take the answer
+    /// from `K_PDF_SCRIPT_SAVE`.)
     pub fn save(&mut self, ctx: &eframe::egui::Context, purpose: T, dialog: rfd::FileDialog) {
+        #[cfg(feature = "script")]
+        if let Some(path) = std::env::var_os("K_PDF_SCRIPT_SAVE") {
+            return self.answer_now(purpose, Some(vec![PathBuf::from(path)]));
+        }
         self.show(ctx, purpose, move || dialog.save_file().map(|p| vec![p]));
     }
 

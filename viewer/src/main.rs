@@ -19,6 +19,7 @@ mod icons;
 mod links;
 mod present;
 mod print;
+mod fields;
 mod redact;
 mod rotate;
 mod images;
@@ -211,6 +212,12 @@ struct CommentAnchors {
     selection: Option<Rect>,
 }
 
+/// Something chosen on the start screen, done once the file is open.
+enum Startup {
+    /// Making a form: form mode.
+    Form,
+}
+
 /// What to do once unsaved changes have been saved or discarded.
 enum After {
     Nothing,
@@ -312,6 +319,8 @@ fn print_job(
 /// What a file dialog was shown for.
 enum Asked {
     Open,
+    /// A file to open, then something to do with it.
+    OpenFor(Startup),
     /// Files to insert at a position.
     Insert(usize),
     /// Images to add to the images shown, at a position.
@@ -435,6 +444,15 @@ struct Viewer {
     /// Redact mode: marking areas to remove for good.
     redact_mode: bool,
     redact: redact::Redact,
+    /// Making a form: placing fields on the pages.
+    form_mode: bool,
+    designer: fields::Designer,
+    /// A new document not saved yet (a blank form): its temporary file.
+    /// Saving it asks where.
+    untitled: Option<PathBuf>,
+    /// What to do once the file being opened is open (chosen on the start
+    /// screen).
+    startup: Option<Startup>,
     /// Highlights and notes: the comment box, the Comment tool.
     comments: comments::Comments,
     /// Light, dark, or as the system is set.
@@ -465,6 +483,9 @@ struct Viewer {
     /// presenter view (remembered while the app runs).
     present: Option<present::Show>,
     presenter_view: bool,
+    /// Mark form fields that can be filled in (blue; red border when
+    /// required).
+    highlight_fields: bool,
     /// The "Delete pages" dialog: the pages field, and why it can't be
     /// used if it can't.
     delete_dialog: Option<(String, Option<String>)>,
@@ -552,6 +573,10 @@ impl Viewer {
             crop: crop::Crop::default(),
             redact_mode: false,
             redact: redact::Redact::default(),
+            form_mode: false,
+            designer: fields::Designer::default(),
+            untitled: None,
+            startup: None,
             comments: comments::Comments::default(),
             compress: compress::Compress::default(),
             images: None,
@@ -562,6 +587,7 @@ impl Viewer {
             compressing: None,
             present: None,
             presenter_view: true,
+            highlight_fields: true,
             delete_dialog: None,
             print: print::Print::default(),
             printing: None,
@@ -606,6 +632,7 @@ impl Viewer {
 
     /// Shows `paths` as the pages of a new document (closing the PDF).
     fn open_images(&mut self, paths: Vec<PathBuf>) {
+        self.startup = None;
         self.close_document();
         self.images = Some(images::Images::open(paths));
         self.toolbar_widths = [None; 2];
@@ -633,6 +660,7 @@ impl Viewer {
         self.set_crop_mode(false);
         self.set_rotate_mode(false);
         self.set_redact_mode(false);
+        self.form_mode = false;
         let mut images = images::Images::cleaning(items);
         images.select_position(self.current_page);
         self.images = Some(images);
@@ -685,6 +713,7 @@ impl Viewer {
         self.crop_mode = false;
         self.rotate_mode = false;
         self.redact_mode = false;
+        self.form_mode = false;
         self.show_info = false;
         self.delete_dialog = None;
         self.last_want = (Vec::new(), 0.0);
@@ -701,6 +730,14 @@ impl Viewer {
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path)).unwrap_or(path);
         self.comments.open = None;
         self.comments.placing = false;
+        // Another file: form mode ends (reopening after saving, it stays).
+        if self.doc.as_ref().is_none_or(|d| d.path != path) {
+            self.form_mode = false;
+        }
+        self.designer.clear();
+        if self.untitled.as_ref() != Some(&path) {
+            self.untitled = None;
+        }
         self.editor.open(&path);
         self.redact = redact::Redact::default();
         if self.images.take().is_some() {
@@ -731,8 +768,8 @@ impl Viewer {
     fn update_title(&mut self, ctx: &egui::Context) {
         let title = match (&self.doc, &self.images) {
             (None, Some(images)) => format!("{}{} — k-pdf", if images.is_modified() { "• " } else { "" }, images.title()),
-            (Some(doc), _) => {
-                let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            (Some(_), _) => {
+                let name = self.doc_name();
                 format!("{}{name} — k-pdf", if self.is_modified() { "• " } else { "" })
             }
             (None, None) => "k-pdf".to_string(),
@@ -902,6 +939,10 @@ impl Viewer {
         let first = paths[0].clone();
         match asked {
             Asked::Open => self.open_files(paths),
+            Asked::OpenFor(startup) => {
+                self.startup = Some(startup);
+                self.open_files(paths);
+            }
             Asked::Insert(position) if self.doc.is_some() => self.insert_files(paths, position.min(self.order.len())),
             Asked::AddImages(at) => {
                 if let Some(images) = &mut self.images {
@@ -1171,6 +1212,7 @@ impl Viewer {
             self.comments.placing = false;
             self.set_edit_mode(false);
             self.redact_mode = false;
+            self.form_mode = false;
         }
         self.crop_mode = on;
         self.crop.clear();
@@ -1185,6 +1227,7 @@ impl Viewer {
             self.set_edit_mode(false);
             self.set_crop_mode(false);
             self.redact_mode = false;
+            self.form_mode = false;
         }
         self.rotate_mode = on;
     }
@@ -1244,6 +1287,7 @@ impl Viewer {
             self.set_edit_mode(false);
             self.crop_mode = false;
             self.crop.clear();
+            self.form_mode = false;
         }
         self.redact_mode = on;
         self.selection = None;
@@ -1321,6 +1365,52 @@ impl Viewer {
         }
     }
 
+    /// Form mode: placing, moving and changing form fields. The fields
+    /// can't be filled in meanwhile (clicks place them instead).
+    fn set_form_mode(&mut self, on: bool) {
+        if on {
+            self.close_comment();
+            self.comments.placing = false;
+            self.set_edit_mode(false);
+            self.set_crop_mode(false);
+            self.rotate_mode = false;
+            self.redact_mode = false;
+        } else {
+            self.designer.clear();
+        }
+        self.form_mode = on;
+        self.selection = None;
+    }
+
+    fn handle_form_action(&mut self, action: fields::Action) {
+        self.designer.message = None;
+        let (page, result) = match action {
+            fields::Action::Add { page, rect, kind, multiline } => match self.editor.add_field(page, rect, kind, multiline) {
+                Ok((before, id)) => {
+                    self.designer.select(id, id);
+                    (page, Ok(before))
+                }
+                Err(e) => (page, Err(e)),
+            },
+            fields::Action::Move { page, widget, rect } => (page, self.editor.move_field(widget, rect)),
+            fields::Action::Update { page, id, spec } => (page, self.editor.update_field(id, &spec)),
+            fields::Action::Delete { page, id } => (page, self.editor.delete_field(id)),
+            fields::Action::Done => {
+                self.set_form_mode(false);
+                return;
+            }
+        };
+        match result {
+            Ok(before) => {
+                self.record(Undo::Text(before));
+                self.form.update_layout(&self.editor.form_fields());
+                self.annotations_changed(page);
+            }
+            // Shown in the form panel, next to what caused it.
+            Err(e) => self.designer.message = Some(format!("Could not change the form: {e}.")),
+        }
+    }
+
     fn handle_editor_event(&mut self, event: editor::Event) {
         match event {
             editor::Event::Applied { page, before } => {
@@ -1342,6 +1432,7 @@ impl Viewer {
             self.crop_mode = false;
             self.crop.clear();
             self.redact_mode = false;
+            self.form_mode = false;
             self.rotate_mode = false;
         }
         self.edit_mode = on;
@@ -1360,6 +1451,7 @@ impl Viewer {
             self.set_edit_mode(false);
             self.set_crop_mode(false);
             self.redact_mode = false;
+            self.form_mode = false;
         }
         self.comments.placing = on;
     }
@@ -1600,10 +1692,16 @@ impl Viewer {
             return;
         }
         let Some(doc) = &self.doc else { return };
-        let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]).set_file_name(name);
-        if let Some(dir) = doc.path.parent() {
-            dialog = dialog.set_directory(dir);
+        let mut dialog = rfd::FileDialog::new().add_filter("PDF documents", &["pdf"]);
+        if self.is_untitled() {
+            // (Not in the temporary folder it was made in.)
+            dialog = dialog.set_file_name("Form.pdf");
+        } else {
+            let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            dialog = dialog.set_file_name(name);
+            if let Some(dir) = doc.path.parent() {
+                dialog = dialog.set_directory(dir);
+            }
         }
         self.dialog.save(&self.ctx, Asked::SaveAs(after), dialog);
     }
@@ -1614,7 +1712,9 @@ impl Viewer {
             self.save_images(false, after);
             return;
         }
-        if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
+        if self.is_untitled() {
+            self.save_as_dialog(after);
+        } else if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
             self.save(path, after);
         }
     }
@@ -1632,6 +1732,7 @@ impl Viewer {
         self.set_edit_mode(false);
         self.set_crop_mode(false);
         self.redact_mode = false;
+        self.form_mode = false;
         self.rotate_mode = false;
         self.comments.placing = false;
         self.selection = None;
@@ -1669,7 +1770,7 @@ impl Viewer {
         let sizes: Vec<Vec2> = self.order.iter().map(|&k| doc.page_sizes[k]).collect();
         let count = sizes.len();
         show.position = show.position.min(count.saturating_sub(1));
-        let title = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let title = self.doc_name();
         let mut navs = ctx.input(|i| show.keys(i));
 
         // Speaker notes: the comments on the page.
@@ -1894,12 +1995,7 @@ impl Viewer {
     /// The "save changes?" dialog.
     fn unsaved_prompt(&mut self, ctx: &egui::Context) {
         let Some(after) = &self.prompt else { return };
-        let name = self
-            .doc
-            .as_ref()
-            .and_then(|d| d.path.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = self.doc_name();
         let when = match after {
             After::Open(_) | After::OpenImages(_) => "opening another file",
             _ => "closing",
@@ -2006,9 +2102,13 @@ impl Viewer {
                     if let Some(p) = self.start_page.take() {
                         self.go_to_page(p);
                     }
+                    if let Some(Startup::Form) = self.startup.take() {
+                        self.set_form_mode(true);
+                    }
                 }
                 Reply::OpenFailed(path, e) => {
                     self.loading = None;
+                    self.startup = None;
                     self.error = Some(format!("Could not open {}: {e}", path.display()));
                 }
                 // Rendered before dark pages were switched on or off.
@@ -2361,6 +2461,9 @@ impl Viewer {
         if pressed(Modifiers::COMMAND, Key::Num0) {
             self.fit = Fit::Width;
         }
+        if pressed(Modifiers::COMMAND, Key::Num9) {
+            self.fit = Fit::Page;
+        }
 
         // --- navigation ---
         let page = self.current_page;
@@ -2596,11 +2699,11 @@ impl Viewer {
                 // The file name, centered in whatever room is left.
                 let free = Rect::from_min_max(Pos2::new(ui.cursor().min.x + 12.0, bar.top()), controls.max);
                 let name = match (&self.doc, &self.images) {
-                    (Some(doc), Some(images)) => {
-                        let name = doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    (Some(_), Some(images)) => {
+                        let name = self.doc_name();
                         Some(if images.cleaning { format!("Cleaning up {name}") } else { format!("Adding images to {name}") })
                     }
-                    (Some(doc), None) => Some(doc.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+                    (Some(_), None) => Some(self.doc_name()),
                     (None, Some(images)) => Some(images.title()),
                     (None, None) => None,
                 };
@@ -2769,6 +2872,12 @@ impl Viewer {
             {
                 self.set_redact_mode(!self.redact_mode);
             }
+            if icons::button(ui, Icon::Form, labels.then_some("Form"), self.form_mode, true)
+                .on_hover_text("Make a form: add text boxes, check boxes and drop-down lists that people can fill in")
+                .clicked()
+            {
+                self.set_form_mode(!self.form_mode);
+            }
             if icons::button(ui, Icon::Comment, labels.then_some("Comment"), self.comments.placing, true)
                 .on_hover_text("Add a comment anywhere: click here, then on the spot. To highlight or comment on text, select it.")
                 .clicked()
@@ -2867,6 +2976,10 @@ impl Viewer {
             if ui.add(egui::Button::new("Present from this page").shortcut_text("Shift+F5")).clicked() {
                 ui.close();
                 self.start_presentation(ui.ctx(), true);
+            }
+            if self.form.fillable_count() > 0 {
+                ui.checkbox(&mut self.highlight_fields, "Highlight fillable fields")
+                    .on_hover_text("Show the fields you can fill in, in blue (a red border: must be filled in)");
             }
             ui.checkbox(&mut self.presenter_view, "Presenter view when presenting")
                 .on_hover_text("A second window with the next slide, notes and a timer (P switches it while presenting)");
@@ -3020,6 +3133,18 @@ impl Viewer {
             self.fit = Fit::None;
             self.set_zoom(self.zoom * ZOOM_STEP);
         }
+        divider(ui);
+        // Fitting stays on (as the window or sidebar changes size) until
+        // zooming by hand; clicking a lit one again turns it off.
+        for (fit, icon, tip) in [
+            (Fit::Width, Icon::FitWidth, "Fit width: the pages fill the window from side to side (Ctrl+0)"),
+            (Fit::Page, Icon::FitPage, "Fit page: the whole page fits in the window (Ctrl+9)"),
+        ] {
+            let on = self.fit == fit;
+            if icons::button(ui, icon, None, on, true).on_hover_text(tip).clicked() {
+                self.fit = if on { Fit::None } else { fit };
+            }
+        }
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
@@ -3080,6 +3205,8 @@ impl Viewer {
             ui.label("Crop — drag on a page to choose the area to keep");
         } else if self.redact_mode {
             ui.label("Redact — mark what to hide, then click Redact");
+        } else if self.form_mode {
+            ui.label("Form — drag on a page to place a field; click a field to move, resize or change it");
         } else if self.edit_mode {
             ui.label(if self.editor.is_editing() {
                 "Editing — click outside the text to apply, Esc to cancel"
@@ -3094,6 +3221,12 @@ impl Viewer {
             } else {
                 "Form filled in — Ctrl+S to save"
             });
+        } else if self.form.fillable_count() > 0 && self.highlight_fields {
+            let n = self.form.fillable_count();
+            ui.label(format!(
+                "This form has {n} {} to fill in, shown in blue (red border: required)",
+                if n == 1 { "field" } else { "fields" }
+            ));
         }
     }
 
@@ -3152,32 +3285,118 @@ impl Viewer {
         self.show_info = open;
     }
 
+    /// The start screen, with no file open: opening a file, or making a
+    /// form (from a blank page or a PDF the user has).
     fn welcome(&mut self, ui: &mut egui::Ui) {
+        #[derive(Clone, Copy)]
+        enum Start {
+            Open,
+            BlankForm,
+            FormFromPdf,
+        }
+        const TILE: Vec2 = Vec2::new(300.0, 192.0);
+        const GAP: f32 = 16.0;
         let p = theme::palette(ui);
-        ui.vertical_centered(|ui| {
-            ui.add_space((ui.available_height() / 2.0 - 140.0).max(24.0));
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(88.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 44.0, p.accent_soft);
-            icons::paint(ui.painter(), r.shrink(22.0), Icon::Document, p.accent);
-            ui.add_space(20.0);
-            ui.label(egui::RichText::new("Open a PDF or images").size(24.0).color(p.text));
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new("Drop files here, or press Ctrl+O").color(p.weak));
-            ui.add_space(20.0);
-            let open = egui::Button::new(egui::RichText::new("Choose a file…").size(15.0).color(p.on_accent))
-                .fill(p.accent)
-                .corner_radius(9)
-                .min_size(Vec2::new(160.0, 38.0));
-            if ui.add(open).on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                self.open_dialog();
+        let mut chosen = None;
+        egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let width = ui.available_width();
+            // Side by side, or one above the other in narrow windows.
+            let cols = if width >= 2.0 * TILE.x + GAP + 32.0 { 2 } else { 1 };
+            let grid = if cols == 2 { Vec2::new(2.0 * TILE.x + GAP, TILE.y) } else { Vec2::new(TILE.x, 2.0 * TILE.y + GAP) };
+            ui.add_space(((ui.available_height() - (64.0 + grid.y)) / 2.0).max(24.0));
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("What would you like to do?").size(24.0).color(p.text));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Or drop files anywhere in this window to open them").color(p.weak));
+            });
+            ui.add_space(22.0);
+            let (area, _) = ui.allocate_exact_size(Vec2::new(width, grid.y), Sense::hover());
+            let origin = Pos2::new(area.center().x - grid.x / 2.0, area.top());
+            let tiles = [
+                (
+                    Icon::Open,
+                    "Open a PDF or images",
+                    "Read, edit, comment on and fill in PDFs. Images open as pages: clean up photos of documents, \
+                     combine files, compress and save them as one PDF.",
+                ),
+                (
+                    Icon::Form,
+                    "Create a form",
+                    "Add text boxes, check boxes and drop-down lists that people can fill in, on a blank page or on a PDF you have \
+                     (such as a paper form).",
+                ),
+            ];
+            for (i, (icon, title, text)) in tiles.into_iter().enumerate() {
+                let offset = if cols == 2 { Vec2::new(i as f32 * (TILE.x + GAP), 0.0) } else { Vec2::new(0.0, i as f32 * (TILE.y + GAP)) };
+                let rect = Rect::from_min_size(origin + offset, TILE);
+                ui.painter().rect(rect, 12.0, p.raised, egui::Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+                let badge = Pos2::new(rect.left() + 36.0, rect.top() + 36.0);
+                ui.painter().circle_filled(badge, 20.0, p.accent_soft);
+                icons::paint(ui.painter(), Rect::from_center_size(badge, Vec2::splat(20.0)), icon, p.accent);
+                let heading = ui.painter().layout_no_wrap(title.to_string(), egui::FontId::proportional(16.0), p.text);
+                ui.painter().galley(Pos2::new(rect.left() + 66.0, badge.y - heading.size().y / 2.0), heading, p.text);
+                let body = ui.painter().layout(text.to_string(), egui::FontId::proportional(12.5), p.weak, TILE.x - 32.0);
+                ui.painter().galley(Pos2::new(rect.left() + 16.0, rect.top() + 68.0), body, p.weak);
+                // The buttons along the bottom.
+                let bar = Rect::from_min_max(Pos2::new(rect.left() + 16.0, rect.bottom() - 48.0), Pos2::new(rect.right() - 16.0, rect.bottom() - 14.0));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                    let primary = |text: &str| {
+                        egui::Button::new(egui::RichText::new(text).color(p.on_accent)).fill(p.accent).corner_radius(8).min_size(Vec2::new(0.0, 32.0))
+                    };
+                    let plain = |text: &str| egui::Button::new(text).corner_radius(8).min_size(Vec2::new(0.0, 32.0));
+                    if i == 0 {
+                        if ui.add(primary("Choose a file…")).on_hover_text("Open a PDF, or images (Ctrl+O)").clicked() {
+                            chosen = Some(Start::Open);
+                        }
+                    } else {
+                        if ui.add(primary("Blank page")).on_hover_text("Start a new form on a blank page").clicked() {
+                            chosen = Some(Start::BlankForm);
+                        }
+                        if ui.add(plain("From a PDF…")).on_hover_text("Add fields to a PDF you have").clicked() {
+                            chosen = Some(Start::FormFromPdf);
+                        }
+                    }
+                });
             }
-            ui.add_space(14.0);
-            ui.label(
-                egui::RichText::new("Images open as pages: keep them as they are, or clean up photos of documents like a scan, then save them as one PDF.")
-                    .size(12.5)
-                    .color(p.weak),
-            );
         });
+        match chosen {
+            Some(Start::Open) => self.open_dialog(),
+            Some(Start::BlankForm) => self.new_blank_form(),
+            Some(Start::FormFromPdf) => {
+                let dialog = rfd::FileDialog::new().set_title("Choose a PDF to add form fields to").add_filter("PDF documents", &["pdf", "PDF"]);
+                self.dialog.pick(&self.ctx, Asked::OpenFor(Startup::Form), dialog);
+            }
+            None => {}
+        }
+    }
+
+    /// Opens a new document of one blank page (Letter or A4, as the locale
+    /// prefers), in form mode. It is saved where the user chooses.
+    fn new_blank_form(&mut self) {
+        let (w, h) = print::default_paper_mm();
+        let pt = |mm: f32| mm * 72.0 / 25.4;
+        let path = self.image_files.next_named("form");
+        if let Err(e) = std::fs::write(&path, k_pdf::edit::fields::blank_document(pt(w), pt(h))) {
+            self.error = Some(format!("Could not make a blank form: {e}"));
+            return;
+        }
+        self.untitled = Some(path.clone());
+        self.startup = Some(Startup::Form);
+        self.open(path);
+    }
+
+    /// The open document's name, for titles: its file's, or "Untitled
+    /// form" for a new one.
+    fn doc_name(&self) -> String {
+        if self.is_untitled() {
+            return "Untitled form".into();
+        }
+        self.doc.as_ref().and_then(|d| d.path.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    }
+
+    /// Whether the open document is new (a blank form) and not saved yet.
+    fn is_untitled(&self) -> bool {
+        self.doc.as_ref().is_some_and(|d| Some(&d.path) == self.untitled.as_ref())
     }
 
     // ------------------------------------------------------------------
@@ -3304,6 +3523,18 @@ impl Viewer {
                         self.redact.show_page(ui, page, position, rect, zoom);
                     }
                 }
+            } else if self.form_mode {
+                let mut action = None;
+                for (&(key, rect), &position) in visible.iter().zip(&visible_positions) {
+                    if let Some(&(0, page)) = self.sources.get(key)
+                        && let Some(a) = self.designer.show_page(ui, page, position, rect, zoom, self.form.fields())
+                    {
+                        action = Some(a);
+                    }
+                }
+                if let Some(action) = action {
+                    self.handle_form_action(action);
+                }
             } else if self.edit_mode {
                 for &(key, rect) in &visible {
                     if let Some(&(0, page)) = self.sources.get(key)
@@ -3353,9 +3584,9 @@ impl Viewer {
             }
 
             // Form fields, on top of the page and the selection area.
-            for &(key, rect) in &visible {
+            for &(key, rect) in visible.iter().filter(|_| !self.form_mode) {
                 if let Some(&(0, page)) = self.sources.get(key) {
-                    self.form.show_page(ui, page, rect, zoom);
+                    self.form.show_page(ui, page, rect, zoom, self.highlight_fields);
                 }
             }
         });
@@ -3584,8 +3815,9 @@ impl eframe::App for Viewer {
     /// `--script`: the next scripted input.
     #[cfg(feature = "script")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        let images = self.images.as_ref().is_some_and(|i| !i.busy());
-        if self.screenshot.is_some() || self.loading.is_some() || (self.doc.is_none() && self.error.is_none() && !images) {
+        // (With nothing to open, the script drives the start screen.)
+        let images_busy = self.images.as_ref().is_some_and(|i| i.busy());
+        if self.screenshot.is_some() || self.loading.is_some() || images_busy {
             ctx.request_repaint();
             return; // waiting for a screenshot, or for the document
         }
@@ -3634,6 +3866,13 @@ impl eframe::App for Viewer {
             }
             _ if !dropped.is_empty() => self.open_files(dropped),
             _ => {}
+        }
+        // Delete and Esc act on the selected field before the shortcuts.
+        if self.form_mode
+            && self.doc.is_some()
+            && let Some(action) = self.designer.keys(&ctx, self.form.fields())
+        {
+            self.handle_form_action(action);
         }
         self.handle_keys(&ctx);
 
@@ -3744,6 +3983,12 @@ impl eframe::App for Viewer {
         {
             self.handle_redact_action(action);
         }
+        if self.form_mode
+            && pdf
+            && let Some(action) = self.designer.panel(&ctx, self.view_rect, self.form.fields())
+        {
+            self.handle_form_action(action);
+        }
         if pdf {
             self.page_pill(&ctx);
             if self.search.dirty {
@@ -3760,7 +4005,7 @@ impl eframe::App for Viewer {
         drop_highlight(&ctx);
         self.poll_print();
         if self.doc.is_some() {
-            let name = self.doc.as_ref().and_then(|d| d.path.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = self.doc_name();
             let sizes: Vec<Vec2> = self.order.iter().map(|&k| self.doc.as_ref().map_or(Vec2::ZERO, |d| d.page_sizes[k])).collect();
             let (textures, order) = (&self.textures, &self.order);
             let texture = |pos: usize| order.get(pos).and_then(|k| textures.get(k)).map(|t| t.texture.id());
@@ -3814,9 +4059,12 @@ impl Viewer {
         }
         // Started with images: once they are read and shown.
         let images = self.images.as_ref().is_some_and(|i| !i.busy());
-        let done_loading = self.loading.is_none() && (self.doc.is_some() || self.error.is_some()) || images;
+        // (The start screen, with nothing to open, is ready at once.)
+        let start_screen = self.doc.is_none() && self.images.is_none() && self.loading.is_none();
+        let done_loading = self.loading.is_none() && (self.doc.is_some() || self.error.is_some() || start_screen) || images;
         let rendered = self.last_want.0.is_empty() && !self.textures.is_empty() && !self.sidebar.pending()
             || self.error.is_some()
+            || start_screen
             || images;
         if done_loading && rendered && !shot.requested {
             if shot.settle > 0 {

@@ -17,6 +17,7 @@
 
 pub mod annotate;
 mod content;
+pub mod fields;
 pub mod fonts;
 mod redact;
 #[cfg(feature = "render")]

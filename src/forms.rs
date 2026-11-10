@@ -18,13 +18,13 @@ use crate::object::{Dictionary, ObjRef, Object, Stream};
 use crate::writer::Changes;
 
 // Field flags (/Ff).
-const READ_ONLY: i64 = 1;
-const REQUIRED: i64 = 1 << 1;
-const MULTILINE: i64 = 1 << 12;
+pub(crate) const READ_ONLY: i64 = 1;
+pub(crate) const REQUIRED: i64 = 1 << 1;
+pub(crate) const MULTILINE: i64 = 1 << 12;
 const PASSWORD: i64 = 1 << 13;
 const RADIO: i64 = 1 << 15;
 const PUSHBUTTON: i64 = 1 << 16;
-const COMBO: i64 = 1 << 17;
+pub(crate) const COMBO: i64 = 1 << 17;
 const EDIT: i64 = 1 << 18;
 const MULTI_SELECT: i64 = 1 << 21;
 const COMB: i64 = 1 << 24;
@@ -332,13 +332,13 @@ fn make_field(doc: &Document, id: ObjRef, dict: &Dictionary, inh: &Inherited, wi
 }
 
 /// The parts of a default appearance string (`/Helv 0 Tf 0 g`) we use.
-struct DefaultAppearance {
-    font: Vec<u8>,
-    size: f32,
-    color: [f32; 3],
+pub(crate) struct DefaultAppearance {
+    pub font: Vec<u8>,
+    pub size: f32,
+    pub color: [f32; 3],
 }
 
-fn parse_da(da: &[u8]) -> DefaultAppearance {
+pub(crate) fn parse_da(da: &[u8]) -> DefaultAppearance {
     let text = String::from_utf8_lossy(da);
     let tokens: Vec<&str> = text.split_whitespace().collect();
     let mut out = DefaultAppearance { font: b"Helv".to_vec(), size: 0.0, color: [0.0; 3] };
@@ -506,7 +506,7 @@ pub(crate) fn encode_text_string(s: &str) -> Vec<u8> {
 }
 
 /// A new normal appearance for a text or choice field's widget.
-fn appearance(doc: &Document, field: &FormField, value: &FieldValue, widget: &Dictionary, fonts: &Dictionary) -> Option<Stream> {
+pub(crate) fn appearance(doc: &Document, field: &FormField, value: &FieldValue, widget: &Dictionary, fonts: &Dictionary) -> Option<Stream> {
     let [x0, y0, x1, y1] = doc.rect(widget.get(b"Rect"))?;
     let rotation = doc
         .get_dict(widget, b"MK")

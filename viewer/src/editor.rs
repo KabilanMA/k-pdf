@@ -21,7 +21,7 @@ use eframe::egui::{
     TextFormat, Vec2,
 };
 use k_pdf::edit::{self as pdfedit, BlockEdit, PageText, TextStyle};
-use k_pdf::Changes;
+use k_pdf::{Changes, ObjRef};
 
 /// What happened in the editor this frame.
 pub enum Event {
@@ -208,6 +208,46 @@ impl Editor {
         self.texts.clear();
         self.preview = None;
         Ok(before)
+    }
+
+    /// Makes a form edit (`k_pdf::edit::fields`). Returns the changes from
+    /// before, for undo, and what the edit returned; on failure nothing is
+    /// changed.
+    fn form_edit<T>(&mut self, edit: impl FnOnce(&k_pdf::Document, &mut Changes) -> k_pdf::Result<T>) -> Result<(Changes, T), String> {
+        let doc = self.doc.as_ref().ok_or("the document isn't open")?;
+        self.session = None;
+        let before = self.changes.clone();
+        match edit(doc, &mut self.changes) {
+            Ok(v) => Ok((before, v)),
+            Err(e) => {
+                self.changes = before;
+                doc.set_overlay(&self.changes);
+                Err(e.to_string())
+            }
+        }
+    }
+
+    /// Adds a form field of `kind` at `rect` (display points) on `page`,
+    /// with a name not used yet. Returns the changes from before and the
+    /// new field.
+    pub fn add_field(&mut self, page: usize, rect: [f32; 4], kind: k_pdf::edit::fields::NewField, multiline: bool) -> Result<(Changes, ObjRef), String> {
+        use k_pdf::edit::fields;
+        self.form_edit(|doc, changes| {
+            let spec = fields::FieldSpec { name: fields::new_field_name(doc, kind), multiline, ..Default::default() };
+            fields::add_field(doc, page, rect, kind, &spec, changes)
+        })
+    }
+
+    pub fn update_field(&mut self, id: ObjRef, spec: &k_pdf::edit::fields::FieldSpec) -> Result<Changes, String> {
+        self.form_edit(|doc, changes| k_pdf::edit::fields::update_field(doc, id, spec, changes)).map(|(before, ())| before)
+    }
+
+    pub fn move_field(&mut self, widget: ObjRef, rect: [f32; 4]) -> Result<Changes, String> {
+        self.form_edit(|doc, changes| k_pdf::edit::fields::move_widget(doc, widget, rect, changes)).map(|(before, ())| before)
+    }
+
+    pub fn delete_field(&mut self, id: ObjRef) -> Result<Changes, String> {
+        self.form_edit(|doc, changes| k_pdf::edit::fields::delete_field(doc, id, changes)).map(|(before, ())| before)
     }
 
     /// Displayed size of every page of the open file, with the edits.

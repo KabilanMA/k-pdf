@@ -38,6 +38,12 @@ pub enum Icon {
     Up,
     Down,
     Close,
+    /// Zoom to fit the page's width: a double arrow between two edges.
+    FitWidth,
+    /// Zoom to fit the whole page: a page with a double arrow top to bottom.
+    FitPage,
+    /// Making a form: a page with a text box and a check box.
+    Form,
 }
 
 /// Draws `icon` in `rect` (laid out on a 16 × 16 grid).
@@ -170,6 +176,25 @@ pub fn paint(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
             line(&[(8.0, 11.5), (8.0, 14.5)]);
             line(&[(5.0, 14.5), (11.0, 14.5)]);
             painter.add(Shape::convex_polygon(vec![p(6.5, 4.8), p(10.5, 7.0), p(6.5, 9.2)], color, Stroke::NONE));
+        }
+        Icon::FitWidth => {
+            line(&[(1.5, 2.5), (1.5, 13.5)]);
+            line(&[(14.5, 2.5), (14.5, 13.5)]);
+            line(&[(4.5, 8.0), (11.5, 8.0)]);
+            line(&[(6.5, 6.0), (4.5, 8.0), (6.5, 10.0)]);
+            line(&[(9.5, 6.0), (11.5, 8.0), (9.5, 10.0)]);
+        }
+        Icon::FitPage => {
+            closed(&[(3.5, 1.5), (12.5, 1.5), (12.5, 14.5), (3.5, 14.5)]);
+            line(&[(8.0, 4.5), (8.0, 11.5)]);
+            line(&[(6.3, 6.2), (8.0, 4.5), (9.7, 6.2)]);
+            line(&[(6.3, 9.8), (8.0, 11.5), (9.7, 9.8)]);
+        }
+        Icon::Form => {
+            closed(&[(2.5, 1.5), (13.5, 1.5), (13.5, 14.5), (2.5, 14.5)]);
+            closed(&[(5.0, 4.0), (11.0, 4.0), (11.0, 6.5), (5.0, 6.5)]);
+            closed(&[(5.0, 9.5), (7.5, 9.5), (7.5, 12.0), (5.0, 12.0)]);
+            line(&[(9.0, 10.75), (11.0, 10.75)]);
         }
         Icon::Search => {
             // A magnifying glass.

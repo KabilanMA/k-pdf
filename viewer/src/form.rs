@@ -11,8 +11,20 @@ use std::collections::HashMap;
 use eframe::egui::{self, Color32, CursorIcon, FontId, Id, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2};
 use k_pdf::{FieldKind, FieldValue, FormField, ObjRef, Widget};
 
-/// The tint marking fields that can be filled in (as other PDF viewers do).
-const FILLABLE_TINT: Color32 = Color32::from_rgba_premultiplied(40, 52, 100, 40);
+/// Fields that can be filled in are marked in blue (as other PDF viewers
+/// do), so they stand out from boxes that are only printed on the page:
+/// a light tint, stronger under the pointer and while typing, and a blue
+/// border; fields that must be filled in get a red border.
+const FILLABLE: Color32 = Color32::from_rgb(37, 99, 235);
+const REQUIRED: Color32 = Color32::from_rgb(220, 38, 38);
+/// The border of the field being typed in: a deeper blue.
+const FOCUSED: Color32 = Color32::from_rgb(29, 78, 216);
+
+/// The tint over a fillable field (see [`FILLABLE`]).
+fn fillable_tint(level: u8) -> Color32 {
+    let base = crate::theme::on_page(FILLABLE);
+    base.gamma_multiply([0.14, 0.24, 0.34][level.min(2) as usize])
+}
 
 #[derive(Default)]
 pub struct Form {
@@ -44,6 +56,11 @@ impl Form {
         self.values != self.saved
     }
 
+    /// How many fields can be filled in.
+    pub fn fillable_count(&self) -> usize {
+        self.fields.iter().filter(|f| !f.read_only && !matches!(f.kind, FieldKind::PushButton | FieldKind::Signature)).count()
+    }
+
     /// The fields whose values changed, for saving.
     pub fn edits(&self) -> Vec<(ObjRef, FieldValue)> {
         self.fields
@@ -54,24 +71,39 @@ impl Form {
             .collect()
     }
 
-    /// Takes new widget positions (after pages were cropped), keeping the
-    /// values entered.
+    /// The fields, as last read.
+    pub fn fields(&self) -> &[FormField] {
+        &self.fields
+    }
+
+    /// Takes the fields as they are after an edit (pages cropped, fields
+    /// made, moved, changed or deleted, or such an edit undone), keeping
+    /// the values entered in the fields that are still there.
     pub fn update_layout(&mut self, fields: &[FormField]) {
-        for f in &mut self.fields {
-            if let Some(n) = fields.iter().find(|n| n.id == f.id) {
-                f.widgets = n.widgets.clone();
+        let mut values = Vec::with_capacity(fields.len());
+        let mut saved = Vec::with_capacity(fields.len());
+        for f in fields {
+            match self.fields.iter().position(|old| old.id == f.id) {
+                // A value of the same kind (a field's kind doesn't change).
+                Some(i) if std::mem::discriminant(&self.values[i]) == std::mem::discriminant(&f.value) => {
+                    values.push(self.values[i].clone());
+                    saved.push(self.saved[i].clone());
+                }
+                _ => {
+                    values.push(f.value.clone());
+                    saved.push(f.value.clone());
+                }
             }
         }
-        let mut by_page: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
-        for (fi, f) in self.fields.iter().enumerate() {
-            if matches!(f.kind, FieldKind::PushButton | FieldKind::Signature) {
-                continue;
-            }
-            for (wi, w) in f.widgets.iter().enumerate() {
-                by_page.entry(w.page).or_default().push((fi, wi));
+        // Choices that are no longer offered (a list's choices changed).
+        for (v, f) in values.iter_mut().zip(fields) {
+            if let (FieldValue::Choice(selected), FieldKind::ComboBox { options, .. } | FieldKind::ListBox { options, .. }) = (v, &f.kind) {
+                selected.retain(|s| options.iter().any(|o| &o.value == s));
             }
         }
-        self.by_page = by_page;
+        *self = Form::new(fields.to_vec());
+        self.values = values;
+        self.saved = saved;
     }
 
     pub fn mark_saved(&mut self) {
@@ -79,8 +111,9 @@ impl Form {
     }
 
     /// Draws the fields of `page` (an index into the open file's pages),
-    /// shown at `page_rect` on screen with `zoom` screen points per PDF point.
-    pub fn show_page(&mut self, ui: &mut egui::Ui, page: usize, page_rect: Rect, zoom: f32) {
+    /// shown at `page_rect` on screen with `zoom` screen points per PDF
+    /// point; with `highlight`, marked as fillable (see [`FILLABLE`]).
+    pub fn show_page(&mut self, ui: &mut egui::Ui, page: usize, page_rect: Rect, zoom: f32, highlight: bool) {
         let Some(widgets) = self.by_page.get(&page) else { return };
         // Fields sit on a white page: use light-theme colors for them.
         let mut ui = ui.new_child(UiBuilder::new().max_rect(page_rect));
@@ -95,8 +128,30 @@ impl Form {
                 continue;
             }
             let id = Id::new(("form-field", field.id.num, wi));
-            if w.background.is_none() && !field.read_only {
-                ui.painter().rect_filled(rect, 0.0, FILLABLE_TINT);
+            // Marked as fillable, over the field's own background (if it
+            // has one) so every fillable field looks the same.
+            let fillable = highlight && !field.read_only;
+            // The field being typed in: a solid border and a glow around
+            // it, whether fields are highlighted or not.
+            let focused = ui.memory(|m| m.has_focus(id));
+            if fillable || focused {
+                let hovered = ui.rect_contains_pointer(rect);
+                ui.painter().rect_filled(rect, 0.0, fillable_tint(if focused { 2 } else { hovered as u8 }));
+                let border = crate::theme::on_page(match (field.required, focused) {
+                    (true, _) => REQUIRED,
+                    (false, true) => FOCUSED,
+                    (false, false) => FILLABLE,
+                });
+                if focused {
+                    let glow = crate::theme::on_page(FILLABLE).gamma_multiply(0.5);
+                    ui.painter().rect_stroke(rect.expand(1.0), 3.0, Stroke::new(4.0, glow), StrokeKind::Outside);
+                }
+                let width = match (focused, field.required || hovered) {
+                    (true, _) => 2.0,
+                    (false, true) => 1.5,
+                    (false, false) => 1.0,
+                };
+                ui.painter().rect_stroke(rect, 0.0, Stroke::new(width, border), StrokeKind::Inside);
             }
             let changed = match &field.kind {
                 FieldKind::Text { multiline, password, max_len, .. } => {
@@ -107,7 +162,7 @@ impl Form {
                 FieldKind::CheckBox | FieldKind::Radio => button(&mut ui, id, rect, field, w, &mut self.values[fi]),
                 FieldKind::ComboBox { options, .. } | FieldKind::ListBox { options, .. } => {
                     let FieldValue::Choice(selected) = &mut self.values[fi] else { continue };
-                    choice(&mut ui, id, rect, zoom, field, options, selected)
+                    choice(&mut ui, id, rect, zoom, field, options, selected, fillable)
                 }
                 FieldKind::PushButton | FieldKind::Signature => false,
             };
@@ -153,14 +208,17 @@ fn text_field(
         2 => egui::Align::Max,
         _ => egui::Align::Min,
     };
-    let pad = (2.0 * zoom).round().clamp(0.0, 100.0) as i8;
+    // The text inset from the border as in the saved appearance (2 pt),
+    // and enough for the text cursor to clear the border (in an empty
+    // field it sits at the left edge, where the border would hide it).
+    let pad = (2.0 * zoom).max(4.0).round().clamp(0.0, 100.0) as i8;
     let edit = if multiline { egui::TextEdit::multiline(text) } else { egui::TextEdit::singleline(text) };
     let mut edit = edit
         .id(id)
         .font(FontId::proportional(size))
         .text_color(color(field.text_color))
-        .frame(egui::Frame::NONE)
-        .margin(egui::Margin::symmetric(pad, 0))
+        // (With a frame given, the frame's margin is the one used.)
+        .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(pad, 0)))
         .min_size(rect.size())
         .horizontal_align(align)
         .password(password)
@@ -174,6 +232,8 @@ fn text_field(
     }
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
     child.set_clip_rect(rect.intersect(ui.clip_rect()));
+    // The cursor in the text's own color, so it shows on the blue tint.
+    child.visuals_mut().text_cursor.stroke = Stroke::new(2.0, color(field.text_color));
     let response = child.put(rect, edit);
     if let Some(tip) = &field.tooltip {
         response.on_hover_text(tip);
@@ -238,6 +298,7 @@ fn draw_mark(painter: &egui::Painter, rect: Rect, style: Option<char>, radio: bo
 
 /// A drop-down list (also used for list boxes); returns whether the
 /// selection changed.
+#[allow(clippy::too_many_arguments)]
 fn choice(
     ui: &mut egui::Ui,
     id: Id,
@@ -246,6 +307,7 @@ fn choice(
     field: &FormField,
     options: &[k_pdf::ChoiceOption],
     selected: &mut Vec<String>,
+    marked: bool,
 ) -> bool {
     let label = selected
         .first()
@@ -256,6 +318,14 @@ fn choice(
     let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
     child.style_mut().override_font_id = Some(FontId::proportional(size));
     child.spacing_mut().interact_size.y = rect.height();
+    if marked {
+        // The blue tint under it shows through, as on other fields.
+        let w = &mut child.visuals_mut().widgets;
+        for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+            state.weak_bg_fill = Color32::TRANSPARENT;
+            state.bg_fill = Color32::TRANSPARENT;
+        }
+    }
     child.add_enabled_ui(!field.read_only, |ui| {
         let response = egui::ComboBox::from_id_salt(id)
             .width(rect.width())
@@ -273,7 +343,12 @@ fn choice(
             response.response.on_hover_text(tip);
         }
     });
-    // Keep the widget's border visible over the combo box frame.
-    ui.painter().rect_stroke(rect, 0.0, Stroke::new(1.0, Color32::from_gray(160)), StrokeKind::Inside);
+    // Keep the field's border visible over the combo box frame.
+    let border = match (marked, field.required) {
+        (true, true) => Stroke::new(1.5, crate::theme::on_page(REQUIRED)),
+        (true, false) => Stroke::new(1.0, crate::theme::on_page(FILLABLE)),
+        (false, _) => Stroke::new(1.0, Color32::from_gray(160)),
+    };
+    ui.painter().rect_stroke(rect, 0.0, border, StrokeKind::Inside);
     changed
 }

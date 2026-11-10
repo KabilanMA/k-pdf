@@ -27,6 +27,9 @@ USAGE:
     k-pdf-cli redact  <in.pdf> <out.pdf> --text <words> [pages]
     k-pdf-cli compress <in.pdf> <out.pdf> [--brotli] [--no-jpeg]
     k-pdf-cli fill    <in.pdf> <out.pdf> <name=value>...
+    k-pdf-cli blank   <out.pdf> [letter|a4|<width>x<height>]
+    k-pdf-cli add-field <in.pdf> <out.pdf> <text|check|dropdown> <name> <page> <left> <top> <right> <bottom>
+                      [--multiline] [--required] [--size PT] [--options a,b,c] [--tooltip <text>]
     k-pdf-cli search  <file.pdf> <words> [--case] [--words] [--no-images]
     k-pdf-cli ocr     <file.pdf> [--page N]
     k-pdf-cli scan    <out.pdf> <photo>... [--mode color|gray|bw|original] [--whole]
@@ -50,6 +53,12 @@ COMMANDS:
     note     Add a comment at a spot on a page (1-based; points from its top-left corner)
     fill     Fill in form fields: text as name=text, check boxes as name=on/off,
              radio buttons and choices as name=<option>
+    blank    Make a PDF with one blank page (Letter, A4, or a size in points), to
+             start a form from
+    add-field Add a fillable field to a page (1-based; points from its top-left corner
+             as shown): a text box (--multiline for several lines), a check box or a
+             drop-down list (--options). --size sets the text size (default: fit
+             to the field); --required marks it as needing an answer
     crop     Keep only the given area of pages (points from the top-left corner of the
              page as shown; all pages, or e.g. \"1,3-5\"); \"crop in out none\" uncrops
     rotate   Turn pages clockwise by 90, 180 or 270 degrees (negative: counterclockwise);
@@ -103,6 +112,8 @@ fn main() -> ExitCode {
         Some("compress") if args.len() >= 3 => compress(&args[1..]),
         Some("edit") if args.len() == 6 => edit(&args[1], &args[2], &args[3], &args[4], &args[5]),
         Some("fill") if args.len() >= 4 => fill(&args[1], &args[2], &args[3..]),
+        Some("blank") if args.len() == 2 || args.len() == 3 => blank(&args[1..]),
+        Some("add-field") if args.len() >= 10 => add_field(&args[1..]),
         Some("scan") if args.len() >= 3 => scan(&args[1..]),
         Some("images") if args.len() >= 3 => images(&args[1..]),
         Some("search") if args.len() >= 3 => search(&args[1..]),
@@ -605,6 +616,66 @@ fn note(args: &[String]) -> CliResult {
     let mut changes = k_pdf::Changes::default();
     let color = k_pdf::edit::annotate::HIGHLIGHT_YELLOW;
     k_pdf::edit::annotate::add_note(&doc, page - 1, [x, y], color, &args[5], &author(), &mut changes)?;
+    let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
+    k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
+    println!("wrote {output}");
+    Ok(())
+}
+
+fn blank(args: &[String]) -> CliResult {
+    let size = match args.get(1).map(|s| s.to_ascii_lowercase()) {
+        None => (612.0, 792.0),
+        Some(s) if s == "letter" => (612.0, 792.0),
+        Some(s) if s == "a4" => (595.276, 841.89),
+        Some(s) => {
+            let (w, h) = s.split_once('x').ok_or("the size is letter, a4 or <width>x<height> in points")?;
+            (w.parse::<f32>()?, h.parse::<f32>()?)
+        }
+    };
+    if !(size.0 >= 3.0 && size.1 >= 3.0 && size.0 <= 14_400.0 && size.1 <= 14_400.0) {
+        return Err("pages are 3 to 14,400 points on each side".into());
+    }
+    std::fs::write(&args[0], k_pdf::edit::fields::blank_document(size.0, size.1))?;
+    println!("wrote {}", args[0]);
+    Ok(())
+}
+
+fn add_field(args: &[String]) -> CliResult {
+    use k_pdf::edit::fields::{FieldSpec, NewField};
+    let (input, output) = (&args[0], &args[1]);
+    if std::path::Path::new(input).canonicalize().ok() == std::path::Path::new(output).canonicalize().ok() {
+        return Err("the output must be a different file than the input".into());
+    }
+    let kind = match args[2].as_str() {
+        "text" => NewField::Text,
+        "check" | "checkbox" => NewField::CheckBox,
+        "dropdown" => NewField::Dropdown,
+        other => return Err(format!("unknown field kind \"{other}\" (text, check or dropdown)").into()),
+    };
+    let doc = Document::open(input)?;
+    let count = doc.page_count()?;
+    let page: usize = args[4].parse().map_err(|_| "invalid page number")?;
+    if page == 0 || page > count {
+        return Err(format!("there is no page {page}").into());
+    }
+    let mut rect = [0.0f32; 4];
+    for (i, v) in args[5..9].iter().enumerate() {
+        rect[i] = v.parse().map_err(|_| format!("invalid number \"{v}\""))?;
+    }
+    let mut spec = FieldSpec { name: args[3].clone(), ..FieldSpec::default() };
+    let mut rest = args[9..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--multiline" => spec.multiline = true,
+            "--required" => spec.required = true,
+            "--size" => spec.font_size = rest.next().ok_or("--size needs a number")?.parse()?,
+            "--options" => spec.options = rest.next().ok_or("--options needs a list")?.split(',').map(|o| o.trim().to_string()).collect(),
+            "--tooltip" => spec.tooltip = rest.next().ok_or("--tooltip needs a text")?.clone(),
+            other => return Err(format!("unknown option \"{other}\"").into()),
+        }
+    }
+    let mut changes = k_pdf::Changes::default();
+    k_pdf::edit::fields::add_field(&doc, page - 1, rect, kind, &spec, &mut changes)?;
     let all: Vec<(usize, usize)> = (0..count).map(|p| (0, p)).collect();
     k_pdf::write_document_with_changes(&[&doc], &all, &changes, std::fs::File::create(output)?)?;
     println!("wrote {output}");

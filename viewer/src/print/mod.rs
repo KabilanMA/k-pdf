@@ -818,7 +818,7 @@ fn scaling_text(s: Scaling) -> &'static str {
 }
 
 /// Letter in the US and Canada (by the locale), A4 elsewhere.
-fn default_paper_mm() -> (f32, f32) {
+pub fn default_paper_mm() -> (f32, f32) {
     let locale = ["LC_ALL", "LC_PAPER", "LANG"].iter().find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()));
     match locale {
         Some(l) if l.contains("_US") || l.contains("_CA") => (215.9, 279.4),
