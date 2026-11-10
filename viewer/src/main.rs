@@ -23,6 +23,7 @@ mod fields;
 mod redact;
 mod signature;
 mod password;
+mod positions;
 mod rotate;
 mod images;
 mod search;
@@ -522,6 +523,12 @@ struct Viewer {
     allow_close: bool,
     /// Page to jump to once the document is open (from `--page`).
     start_page: Option<usize>,
+    /// With `start_page`: the spot on it (display points from its top),
+    /// where reading left off last time.
+    start_spot: Option<f32>,
+    /// A page (and spot on it) to show once the zoom fits the window: the
+    /// first layout of a file opened at `start_page`.
+    jump: Option<(usize, Option<f32>)>,
     screenshot: Option<Screenshot>,
     #[cfg(feature = "script")]
     script: Option<script::Script>,
@@ -617,6 +624,8 @@ impl Viewer {
             saving: None,
             allow_close: false,
             start_page: args.page.map(|p| p.saturating_sub(1)),
+            start_spot: None,
+            jump: None,
             screenshot: args.screenshot.map(|path| Screenshot { path, requested: false, settle: 3, exit: true }),
             #[cfg(feature = "script")]
             script: args.script.map(|p| script::Script::load(&p).unwrap_or_else(|e| panic!("script: {e}"))),
@@ -744,6 +753,17 @@ impl Viewer {
         let path = std::path::absolute(&path).unwrap_or(path);
         #[cfg(not(windows))]
         let path = std::fs::canonicalize(&path).or_else(|_| std::path::absolute(&path)).unwrap_or(path);
+        // Where reading left off: remembered for the file being left, and
+        // picked up for this one (unless a page was asked for, or it is
+        // reopened after saving).
+        self.remember_position();
+        self.start_spot = None;
+        if self.start_page.is_none()
+            && let Some(at) = positions::get(&path)
+        {
+            self.start_page = Some(at.page);
+            self.start_spot = Some(at.spot);
+        }
         self.comments.open = None;
         self.comments.placing = false;
         // Another file: form mode ends (reopening after saving, it stays).
@@ -2176,9 +2196,9 @@ impl Viewer {
                     self.page_input = "1".into();
                     self.pending_offset = Some(Vec2::ZERO);
                     self.fit = Fit::Width;
-                    if let Some(p) = self.start_page.take() {
-                        self.go_to_page(p);
-                    }
+                    // Jumped to once the zoom fits the window (the offset
+                    // depends on it).
+                    self.jump = self.start_page.take().map(|p| (p, self.start_spot.take()));
                     if let Some(Startup::Form) = self.startup.take() {
                         self.set_form_mode(true);
                     }
@@ -2364,6 +2384,24 @@ impl Viewer {
         let pos = tops.partition_point(|&t| t <= y).saturating_sub(1);
         let within = tops.get(pos).map_or(0.0, |&t| (y - t) / self.zoom);
         (pos, within.max(0.0))
+    }
+
+    /// Remembers where reading left off in the open file (on disk, for
+    /// the next time it is opened): the spot at the top of the view.
+    fn remember_position(&self) {
+        let Some(doc) = &self.doc else { return };
+        if self.images.is_some() || self.untitled.as_ref() == Some(&doc.path) || self.loading.is_some() {
+            return;
+        }
+        let (tops, _) = self.layout();
+        if tops.is_empty() {
+            return;
+        }
+        // As `go_to` places a spot: 2 margins below the top of the view.
+        let y = self.pending_offset.unwrap_or(self.last_offset).y + 2.0 * MARGIN;
+        let page = tops.partition_point(|&t| t <= y).saturating_sub(1);
+        let spot = ((y - tops[page]) / self.zoom).max(0.0);
+        positions::set(&doc.path, positions::Position { page, spot });
     }
 
     fn go_to_page(&mut self, page: usize) {
@@ -3537,6 +3575,9 @@ impl Viewer {
         }
         self.viewport_size = ui.available_size();
         self.apply_fit();
+        if let Some((page, spot)) = self.jump.take() {
+            self.go_to(page, spot);
+        }
 
         let (tops, content) = self.layout();
         let Some(doc) = &self.doc else { return anchors };
@@ -3946,6 +3987,10 @@ impl Viewer {
 }
 
 impl eframe::App for Viewer {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.remember_position();
+    }
+
     /// `--script`: the next scripted input.
     #[cfg(feature = "script")]
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {

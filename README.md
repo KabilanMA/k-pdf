@@ -11,6 +11,7 @@ A fast, lightweight PDF viewer and editor for Linux, Windows and macOS.
 - **Read** — smooth scrolling, page thumbnails, zoom, clickable links, and text you can select and copy.
 - **Open password-protected PDFs** — k-pdf asks for the password (the eye button shows what you typed) and opens the file. Everything works as usual: read, search, edit, sign, print. Saving keeps the same password, so the file stays protected. Files that are only protected against changes open without asking.
 - **Find words** — Ctrl+F searches the whole document and highlights every match; Enter goes to the next. It also finds words in scanned pages, photos and pictures, which k-pdf reads with built-in text recognition (OCR), even when a page was scanned crooked, sideways or upside down. On scanned pages you can then select and copy the text too.
+- **Pick up where you left off** — a file opens at the page and spot where you stopped reading it last time, even after closing k-pdf.
 - **Jump between sections** — the sidebar lists a document's headings and subheadings and highlights the one you're reading. Long documents open on it, short ones on the page thumbnails; one click switches.
 - **Edit text** — click any paragraph and type. The text keeps its font, size and color, and you can change those as in a word processor.
 - **Highlight and comment** — select text to highlight it in one of four colors or comment on it, or drop a note anywhere on a page. The sidebar lists all the comments. They're saved as standard PDF comments, so other PDF readers show them too.

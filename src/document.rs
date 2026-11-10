@@ -404,7 +404,7 @@ impl Document {
         match result {
             Ok(o) => Ok(o),
             // A bad offset usually means a damaged xref: rebuild once, retry.
-            Err(e) if !self.reconstructed.get() => {
+            Err(_) if !self.reconstructed.get() => {
                 self.reconstruct()?;
                 self.get_object_inner(r)
             }
