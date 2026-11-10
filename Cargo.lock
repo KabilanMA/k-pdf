@@ -1301,6 +1301,7 @@ dependencies = [
  "ocrs",
  "rten",
  "rten-imageproc",
+ "rten-tensor",
  "tiny-skia",
  "ttf-parser",
 ]
