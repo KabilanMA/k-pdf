@@ -426,6 +426,8 @@ The default build includes compression, which compiles two C libraries (libdefla
 | `packaging/macos/` | App bundle: `Info.plist`, icon (`k-pdf.icns`), `bundle.sh` (universal app and `.dmg`) |
 | `viewer/assets/icon-128.rgba` | Window icon (the SVG icon rendered at 128 px, raw RGBA) |
 | `packaging/make-icons.py` | Makes the `.ico`, `.icns` and window icon from `packaging/linux/k-pdf.svg` |
+| `bench/bench.py` | Benchmark against MuPDF, poppler, Ghostscript (and qpdf and desktop viewers when installed); draws the charts in `bench/results/` and rewrites the Benchmarks section of README.md |
+| `bench/corpus.txt` | The public documents (TeX Live and R manuals) the benchmark uses |
 | `viewer/src/theme.rs` | Dark and light palettes, styling, the system UI font |
 | `viewer/src/icons.rs` | Vector toolbar icons and buttons |
 
@@ -450,6 +452,19 @@ Search was checked on the 3,962-page R reference manual (all pages in about a se
 Scanning was checked on synthetic phone photos (rendered pages warped in perspective onto wood, a dark desk and a light-gray table, with lighting gradients, a shadow, a color cast, noise and blur, one stored sideways with an Exif tag, and a flat scan slanted by 3°): the corners were found within about a pixel of the true ones, and the slanted scan was levelled. The PNG reader was compared with PIL on every PNG kind (palette, gray, 1- and 16-bit, gray and color with alpha, interlaced), and 400 random JPEG and PNG images from the development machine were scanned without an error or a hang. The GIF, BMP and TIFF readers were compared with PIL pixel for pixel (GIF plain and interlaced; BMP 1-, 8-, 24- and 32-bit; TIFF uncompressed, LZW, Deflate, PackBits, palette, gray, JPEG and fax G3/G4 both ways round; WebP lossy and lossless with alpha): identical, JPEG-in-TIFF within 1 level. 2,377 images on the development machine (631 GIF, 264 WebP, 87 BMP, 20 TIFF, the rest JPEG and PNG) were made into PDFs without a panic or a hang (6 failed: files named .png that aren't images), and so were 2,265 damaged copies (cut short, or with bytes changed) of the GIF, BMP and TIFF files. The viewer's image pages were checked with scripts: changing the look, placing corners (with the magnifier), turning, Use for all, undo, adding, reordering and removing pages, inserting images into a PDF, and saving (JPEGs copied in byte for byte).
 
 Every file passed in both modes. The default mode made the 300 files 10.1% smaller (16.5% for the files in Downloads, where photos and repeated form parts are common); with Brotli, 22.7%.
+
+#### Benchmarks
+
+`python3 bench/bench.py` compares k-pdf with MuPDF (`mutool`), poppler (`pdftoppm`, `pdftotext`, `pdfunite`), Ghostscript, qpdf and the desktop viewers that are installed (MuPDF, Evince, Papers, Okular, zathura). It times rendering pages at 144 dpi, extracting text, merging, lossless compression, and the viewers' memory with a document open; it also checks that the renders match MuPDF's and poppler's pixels and that the extracted words match theirs. Then it redraws the charts in `bench/results/` (light and dark SVGs), saves the numbers in `bench/results/results.json` and rewrites the section between the `benchmarks:start` / `benchmarks:end` markers in README.md. Rerun it after changes that could affect speed or memory.
+
+```sh
+python3 bench/bench.py                    # everything (about 15 minutes; viewer windows open and close)
+python3 bench/bench.py --only render,text # some tasks; the others keep their saved results
+python3 bench/bench.py --no-viewers       # no windows
+python3 bench/bench.py --report-only      # redraw charts and README from results.json
+```
+
+It needs Python 3 with matplotlib, numpy and Pillow, and GNU time (`/usr/bin/time`) for memory: the max RSS that `wait4` reports for a child also counts the memory of the parent that forked it, so it would show the script's own size for small tools. Each command runs once to warm the disk cache, then three times; the median time and the highest peak memory are kept. The documents are listed in `bench/corpus.txt`, with optional pages to render.
 
 ### Known limitations (planned for later phases)
 - **Password-protected PDFs:** only the standard (password) security handler; files encrypted for certain people with certificates can't be opened. AES-256 passwords aren't SASLprep-normalized (plain passwords are unaffected; unusual Unicode ones may not match). The owner's permissions (no printing, no copying, …) aren't enforced, as in most open-source readers. Protection can't be added to or changed on a file, only kept or (with the CLI's `decrypt`) removed.

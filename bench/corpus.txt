@@ -1,0 +1,13 @@
+# Documents used by bench/bench.py, one per line:
+#   label | path | what it is | pages to render (optional; default: spread over the document)
+#
+# They come from TeX Live and R's documentation, so anyone with those installed
+# (texlive-scheme-full / R on Fedora, texlive-full / r-base on Debian) can rerun
+# the benchmark on the same files. Missing files are skipped with a warning.
+# `~` and environment variables in paths are expanded.
+
+Manual     | /usr/share/texlive/texmf-dist/doc/texlive/texlive-en/texlive-en.pdf      | 47-page manual: text, a few screenshots
+Maps       | /usr/share/texlive/texmf-dist/doc/latex/mercatormap/mercatormap.pdf     | 95 pages of vector maps and satellite images
+Symbols    | /usr/share/texlive/texmf-dist/doc/latex/comprehensive/symbols-a4.pdf    | 422 pages, hundreds of embedded fonts
+Photo book | /usr/share/texlive/texmf-dist/doc/latex/willowtreebook/willowtreebook.pdf | 18 pages with an 18-megapixel photo | 1,3,18
+R manual   | /usr/share/doc/R/manual/fullrefman.pdf                                    | 3,962-page reference manual
