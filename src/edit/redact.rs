@@ -580,5 +580,5 @@ fn flate_stream(mut dict: Dictionary, data: &[u8]) -> Result<Stream> {
     let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(data)?;
     dict.set(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
-    Ok(Stream { dict, raw: enc.finish()? })
+    Ok(Stream { dict, raw: enc.finish()?.into() })
 }

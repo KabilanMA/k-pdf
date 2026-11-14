@@ -511,7 +511,7 @@ pub fn edit_text(doc: &Document, edit: &BlockEdit, changes: &mut Changes) -> Res
     enc.write_all(&new_content)?;
     let mut stream_dict = Dictionary::new();
     stream_dict.set(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
-    let contents = add(Object::Stream(Stream { dict: stream_dict, raw: enc.finish()? }));
+    let contents = add(Object::Stream(Stream { dict: stream_dict, raw: enc.finish()?.into() }));
 
     resources.set(b"Font".to_vec(), Object::Dictionary(font_res));
     let mut page_dict = page.dict.clone();

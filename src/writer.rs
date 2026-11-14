@@ -18,7 +18,7 @@
 //! regardless of the file size. Damaged files are saved as repaired.
 
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 use std::io::{self, Write};
 
 use crate::document::{Document, Page};
@@ -55,7 +55,7 @@ pub fn write_document(docs: &[&Document], pages: &[(usize, usize)], out: impl Wr
 #[derive(Debug, Default, Clone)]
 pub struct Changes {
     /// Object number → (reference, new object).
-    pub replace: HashMap<u32, (ObjRef, Object)>,
+    pub replace: std::collections::HashMap<u32, (ObjRef, Object)>,
     pub added: Vec<(ObjRef, Object)>,
 }
 
@@ -92,6 +92,44 @@ pub fn write_document_with_options(
     options: &WriteOptions,
     out: impl Write,
 ) -> Result<()> {
+    // Saving visits every object in reference order, which jumps between
+    // object streams: keep them all decoded while writing (see
+    // `Document::with_object_cache`).
+    fn with_caches<R>(docs: &[&Document], f: impl FnOnce() -> R) -> R {
+        match docs.split_first() {
+            None => f(),
+            Some((d, rest)) => d.with_object_cache(64 << 20, || with_caches(rest, f)),
+        }
+    }
+    with_caches(docs, || write_documents(docs, pages, changes, Preloaded::default(), options, out).map(drop))
+}
+
+/// Objects of the (first) document already read by the caller, by number,
+/// so the writer doesn't read them again.
+pub(crate) type Preloaded = crate::hash::HashMap<u32, Object>;
+
+/// [`write_document_with_options`] for one document whose objects (the
+/// unchanged ones; changed ones are in `changes`) were all read already.
+/// Returns what is left of them, to be dropped when convenient.
+pub(crate) fn write_preloaded(
+    doc: &Document,
+    changes: &Changes,
+    preloaded: Preloaded,
+    options: &WriteOptions,
+    out: impl Write,
+) -> Result<Vec<Object>> {
+    let pages: Vec<(usize, usize)> = (0..doc.page_count()?).map(|p| (0, p)).collect();
+    write_documents(&[doc], &pages, changes, preloaded, options, out)
+}
+
+fn write_documents(
+    docs: &[&Document],
+    pages: &[(usize, usize)],
+    changes: &Changes,
+    preloaded: Preloaded,
+    options: &WriteOptions,
+    out: impl Write,
+) -> Result<Vec<Object>> {
     let Some(&doc) = docs.first() else { return Err(Error::Object("no document to write".into())) };
     let all_pages: Vec<Vec<Page>> = docs.iter().map(|d| d.pages()).collect::<Result<_>>()?;
     for &(d, p) in pages {
@@ -118,10 +156,10 @@ pub fn write_document_with_options(
 
     // Replacement objects: the catalog, the new flat page tree, and each
     // base page with its inherited attributes and new parent.
-    let mut replace: HashMap<u32, (ObjRef, Object)> = HashMap::new();
+    let mut replace: HashMap<u32, (ObjRef, Object)> = HashMap::default();
     replace.insert(catalog_ref.num, (catalog_ref, Object::Dictionary(catalog)));
     // Output reference of every page used, by (document, page).
-    let mut page_refs: HashMap<(usize, usize), ObjRef> = HashMap::new();
+    let mut page_refs: HashMap<(usize, usize), ObjRef> = HashMap::default();
     let mut importers: Vec<Importer> = docs.iter().map(|&d| Importer::new(d)).collect();
     for &(d, p) in pages {
         if page_refs.contains_key(&(d, p)) {
@@ -175,29 +213,6 @@ pub fn write_document_with_options(
         .iter()
         .map(|(n, e)| (*n, if let XrefEntry::InFile { generation, .. } = e { *generation } else { 0 }))
         .collect();
-    let added: HashMap<u32, &Object> = changes.added.iter().map(|(r, o)| (r.num, o)).collect();
-    let mut used: HashSet<u32> = HashSet::new();
-    let mut todo: Vec<u32> = vec![catalog_ref.num];
-    todo.extend(trailer.get(b"Info").and_then(Object::as_reference).map(|r| r.num));
-    while let Some(num) = todo.pop() {
-        if skip.contains(&num) || !used.insert(num) {
-            continue;
-        }
-        let loaded;
-        let obj = match replace.get(&num).or(changes.replace.get(&num)) {
-            Some((_, o)) => o,
-            None => match added.get(&num) {
-                Some(o) => *o,
-                None => {
-                    loaded = doc.get_object(ObjRef::new(num, generations.get(&num).copied().unwrap_or(0)))
-                        .unwrap_or(Object::Null);
-                    &loaded
-                }
-            },
-        };
-        references(obj, &mut todo);
-    }
-
     // The newest version among the documents.
     let version = options.version.clone().unwrap_or_else(|| {
         docs.iter()
@@ -209,6 +224,43 @@ pub fn write_document_with_options(
     // PDF 1.5+ files are saved with compressed object streams, like the
     // original most likely was; older versions get a classic xref table.
     let compress = version_tuple(&version) >= (1, 5);
+    let added: HashMap<u32, &Object> = changes.added.iter().map(|(r, o)| (r.num, o)).collect();
+    let mut used: HashSet<u32> = HashSet::default();
+    // Objects read from the file while finding the ones in use, kept for
+    // writing so they aren't parsed twice: as their text when they will go
+    // into an object stream (much smaller than the parsed object), else as
+    // they are.
+    let mut read: crate::hash::HashMap<u32, Read> = preloaded.into_iter().map(|(n, o)| (n, Read::Object(o))).collect();
+    let mut todo: Vec<u32> = vec![catalog_ref.num];
+    todo.extend(trailer.get(b"Info").and_then(Object::as_reference).map(|r| r.num));
+    while let Some(num) = todo.pop() {
+        if skip.contains(&num) || !used.insert(num) {
+            continue;
+        }
+        let loaded;
+        let obj = match replace.get(&num).or(changes.replace.get(&num)) {
+            Some((_, o)) => o,
+            None => match added.get(&num) {
+                Some(o) => *o,
+                None if read.contains_key(&num) => {
+                    if let Some(Read::Object(o)) = read.get(&num) {
+                        references(o, &mut todo);
+                    }
+                    continue;
+                }
+                None => {
+                    let generation = generations.get(&num).copied().unwrap_or(0);
+                    loaded = doc.get_object(ObjRef::new(num, generation)).unwrap_or(Object::Null);
+                    references(&loaded, &mut todo);
+                    let packed = compress && generation == 0 && !matches!(loaded, Object::Stream(_));
+                    read.insert(num, if packed { Read::Text(loaded.to_bytes()) } else { Read::Object(loaded) });
+                    continue;
+                }
+            },
+        };
+        references(obj, &mut todo);
+    }
+
     let mut sink = Sink::new(out, &version, compress, options.max_compression)?;
     // A password-protected base document stays protected: encrypted again
     // with its key, with its encryption dictionary and file ID, so the
@@ -216,7 +268,10 @@ pub fn write_document_with_options(
     // documents were decrypted as they were read.)
     sink.crypt = if options.decrypt { None } else { doc.crypt().cloned() };
 
-    let mut changed: HashMap<u32, (ObjRef, Object)> = changes.replace.clone();
+    let mut changed: HashMap<u32, (ObjRef, Object)> = changes.replace.iter().map(|(&n, v)| (n, v.clone())).collect();
+    // Objects written (and preloaded ones not needed), dropped by the
+    // caller: freeing a whole document's objects one by one is slow.
+    let mut done: Vec<Object> = Vec::new();
     for (num, entry) in &entries {
         if !used.contains(num) {
             continue;
@@ -232,7 +287,14 @@ pub fn write_document_with_options(
                 let r = ObjRef::new(*num, generation);
                 // An unreadable object becomes null rather than failing
                 // the whole save.
-                let obj = doc.get_object(r).unwrap_or(Object::Null);
+                let obj = match read.remove(num) {
+                    Some(Read::Text(text)) => {
+                        sink.add_text(r.num, text, &mut new_ref)?;
+                        continue;
+                    }
+                    Some(Read::Object(obj)) => obj,
+                    None => doc.get_object(r).unwrap_or(Object::Null),
+                };
                 if is_file_structure(&obj) {
                     continue;
                 }
@@ -240,7 +302,12 @@ pub fn write_document_with_options(
             }
         };
         sink.add(r, &obj, &mut new_ref)?;
+        done.push(obj);
     }
+    done.extend(read.into_values().filter_map(|r| match r {
+        Read::Object(o) => Some(o),
+        Read::Text(_) => None,
+    }));
     // New objects, and replacements for objects missing from the xref.
     let mut rest: Vec<_> = replace.into_values().chain(changed.into_values()).collect();
     // (A new object that was replaced since is written once, replaced.)
@@ -262,7 +329,8 @@ pub fn write_document_with_options(
             new_trailer.set(key.to_vec(), v.clone());
         }
     }
-    sink.finish(new_trailer, &mut new_ref)
+    sink.finish(new_trailer, &mut new_ref)?;
+    Ok(done)
 }
 
 /// Adds the object numbers `obj` refers to (directly) to `out`.
@@ -304,7 +372,7 @@ struct Importer<'a> {
 
 impl<'a> Importer<'a> {
     fn new(doc: &'a Document) -> Self {
-        Importer { doc, map: HashMap::new(), queue: Vec::new(), pages: HashMap::new(), direct_pages: Vec::new() }
+        Importer { doc, map: HashMap::default(), queue: Vec::new(), pages: HashMap::default(), direct_pages: Vec::new() }
     }
 
     fn add_page(&mut self, page: &Page, new_ref: &mut impl FnMut() -> ObjRef) -> ObjRef {
@@ -392,6 +460,8 @@ fn is_page_tree_node(obj: &Object) -> bool {
 /// Objects per object stream.
 const OBJSTM_SIZE: usize = 100;
 const OBJSTM_SIZE_MAX: usize = 400;
+/// Object streams compressed together, one per thread.
+const PACKED_AT_ONCE: usize = 16;
 
 enum Entry {
     InFile { generation: u16, offset: u64 },
@@ -400,12 +470,23 @@ enum Entry {
 
 /// Writes objects and remembers where they went, then writes the
 /// cross-reference section.
+/// An object read while finding the objects in use (see `write_documents`).
+enum Read {
+    /// Its text, for an object stream.
+    Text(Vec<u8>),
+    Object(Object),
+}
+
 struct Sink<W: Write> {
     w: CountingWriter<W>,
     entries: HashMap<u32, Entry>,
     /// With compression: objects waiting to go into the next object stream,
     /// already serialized.
     batch: Vec<(u32, Vec<u8>)>,
+    /// Object streams packed but not yet compressed (their reference,
+    /// dictionary and data): they are compressed several at a time on
+    /// separate threads.
+    packed: Vec<(ObjRef, Dictionary, Vec<u8>)>,
     compress: bool,
     /// Compress as tightly as possible.
     max: bool,
@@ -418,22 +499,28 @@ impl<W: Write> Sink<W> {
     fn new(out: W, version: &str, compress: bool, max: bool) -> io::Result<Self> {
         let mut w = CountingWriter { inner: io::BufWriter::new(out), written: 0 };
         w.write_all(format!("%PDF-{version}\n%\u{e2}\u{e3}\u{cf}\u{d3}\n").as_bytes())?;
-        Ok(Sink { w, entries: HashMap::new(), batch: Vec::new(), compress, max, crypt: None })
+        Ok(Sink { w, entries: HashMap::default(), batch: Vec::new(), packed: Vec::new(), compress, max, crypt: None })
     }
 
     fn add(&mut self, r: ObjRef, obj: &Object, new_ref: &mut impl FnMut() -> ObjRef) -> io::Result<()> {
         // Streams can't go into object streams, and objects there must have
         // generation 0.
         if self.compress && r.generation == 0 && !matches!(obj, Object::Stream(_)) {
-            self.batch.push((r.num, obj.to_string().into_bytes()));
-            // Bigger object streams compress better (similar objects share
-            // one compression context), smaller ones load faster.
-            if self.batch.len() >= if self.max { OBJSTM_SIZE_MAX } else { OBJSTM_SIZE } {
-                self.flush_batch(new_ref)?;
-            }
-            return Ok(());
+            return self.add_text(r.num, obj.to_bytes(), new_ref);
         }
         self.write_direct(r, obj)
+    }
+
+    /// Adds an object, already serialized, to the next object stream.
+    fn add_text(&mut self, num: u32, text: Vec<u8>, new_ref: &mut impl FnMut() -> ObjRef) -> io::Result<()> {
+        debug_assert!(self.compress);
+        self.batch.push((num, text));
+        // Bigger object streams compress better (similar objects share
+        // one compression context), smaller ones load faster.
+        if self.batch.len() >= if self.max { OBJSTM_SIZE_MAX } else { OBJSTM_SIZE } {
+            self.flush_batch(new_ref)?;
+        }
+        Ok(())
     }
 
     fn write_direct(&mut self, r: ObjRef, obj: &Object) -> io::Result<()> {
@@ -468,15 +555,37 @@ impl<W: Write> Sink<W> {
         dict.set(b"N".to_vec(), Object::Integer(self.batch.len() as i64));
         dict.set(b"First".to_vec(), Object::Integer(first as i64));
         dict.set(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
-        let stream = Stream { dict, raw: deflate(&data, self.max)? };
         self.batch.clear();
-        self.write_direct(stream_ref, &Object::Stream(stream))
+        self.packed.push((stream_ref, dict, data));
+        if self.packed.len() >= PACKED_AT_ONCE {
+            self.write_packed()?;
+        }
+        Ok(())
+    }
+
+    /// Compresses the packed object streams (in parallel) and writes them.
+    fn write_packed(&mut self) -> io::Result<()> {
+        let packed = std::mem::take(&mut self.packed);
+        let max = self.max;
+        let compressed: Vec<io::Result<Vec<u8>>> = if packed.len() == 1 {
+            vec![deflate(&packed[0].2, max)]
+        } else {
+            std::thread::scope(|s| {
+                let handles: Vec<_> = packed.iter().map(|(_, _, data)| s.spawn(move || deflate(data, max))).collect();
+                handles.into_iter().map(|h| h.join().expect("compression thread panicked")).collect()
+            })
+        };
+        for ((r, dict, _), raw) in packed.into_iter().zip(compressed) {
+            self.write_direct(r, &Object::Stream(Stream { dict, raw: raw?.into() }))?;
+        }
+        Ok(())
     }
 
     /// Writes the cross-reference section (a table, or a compressed xref
     /// stream) with `trailer`'s entries.
     fn finish(mut self, mut trailer: Dictionary, new_ref: &mut impl FnMut() -> ObjRef) -> Result<()> {
         self.flush_batch(new_ref)?;
+        self.write_packed()?;
         // The encryption dictionary, itself not encrypted.
         if let Some(crypt) = self.crypt.take() {
             let r = new_ref();
@@ -557,7 +666,7 @@ impl<W: Write> Sink<W> {
                 parms.set(b"Columns".to_vec(), w(row_len));
                 dict.set(b"DecodeParms".to_vec(), Object::Dictionary(parms));
             }
-            let stream = Stream { dict, raw: deflate(&data, self.max)? };
+            let stream = Stream { dict, raw: deflate(&data, self.max)?.into() };
             write_object(&mut self.w, xref_ref, &Object::Stream(stream))?;
             self.w.write_all(format!("startxref\n{xref_at}\n%%EOF\n").as_bytes())?;
         } else {
@@ -580,13 +689,16 @@ impl<W: Write> Sink<W> {
 /// Zlib-compressed `data`; with `max`, as small as libdeflate can make it.
 fn deflate(data: &[u8], max: bool) -> io::Result<Vec<u8>> {
     #[cfg(feature = "compress")]
-    if max {
-        return Ok(crate::compress::deflate_max(data));
+    {
+        Ok(if max { crate::compress::deflate_max(data) } else { crate::compress::deflate_fast(data) })
     }
-    let _ = max;
-    let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
-    enc.write_all(data)?;
-    enc.finish()
+    #[cfg(not(feature = "compress"))]
+    {
+        let _ = max;
+        let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(data)?;
+        enc.finish()
+    }
 }
 
 /// Inner `/Pages` nodes of the existing page tree (everything except the
@@ -605,13 +717,13 @@ struct FieldPruner<'a> {
 
 impl<'a> FieldPruner<'a> {
     fn new(doc: &'a Document, changes: &'a Changes, dropped: &'a HashSet<u32>, pages: &[Page]) -> Self {
-        let mut gone = HashSet::new();
+        let mut gone = HashSet::default();
         for page in pages.iter().filter(|p| dropped.contains(&p.id.num)) {
             if let Ok(Object::Array(annots)) = doc.get_resolved(&page.dict, b"Annots") {
                 gone.extend(annots.iter().filter_map(Object::as_reference).map(|r| r.num));
             }
         }
-        FieldPruner { doc, changes, dropped, gone, seen: HashSet::new() }
+        FieldPruner { doc, changes, dropped, gone, seen: HashSet::default() }
     }
 
     /// An object as it will be written (with the edits).
@@ -681,9 +793,9 @@ impl<'a> FieldPruner<'a> {
 }
 
 fn old_tree_nodes(doc: &Document, catalog_ref: &ObjRef, root: ObjRef) -> HashSet<u32> {
-    let mut nodes = HashSet::new();
+    let mut nodes = HashSet::default();
     let mut stack = vec![Object::Reference(root)];
-    let mut visited = HashSet::new();
+    let mut visited = HashSet::default();
     while let Some(node) = stack.pop() {
         let Some(r) = node.as_reference() else { continue };
         if !visited.insert(r.num) || visited.len() > 1_000_000 {
@@ -719,11 +831,13 @@ fn write_object(w: &mut impl Write, r: ObjRef, obj: &Object) -> io::Result<()> {
         Object::Stream(s) => {
             let mut dict = s.dict.clone();
             dict.set(b"Length".to_vec(), Object::Integer(s.raw.len() as i64));
-            write!(w, "{}\nstream\n", Object::Dictionary(dict))?;
+            let mut head = Object::Dictionary(dict).to_bytes();
+            head.extend_from_slice(b"\nstream\n");
+            w.write_all(&head)?;
             w.write_all(&s.raw)?;
             w.write_all(b"\nendstream")?;
         }
-        other => write!(w, "{other}")?,
+        other => w.write_all(&other.to_bytes())?,
     }
     w.write_all(b"\nendobj\n")
 }

@@ -844,9 +844,12 @@ def build_report(R):
             dict(title="Time", data=R["compress"], key="time", fmt=fmt_time),
         ], TOOL_ORDER, tool_color)
         parts.append("### Compression\n\n" + picture(stem, "Compressed size and time per document")
-                     + "\n\nk-pdf (`compress`), MuPDF (`mutool clean -gg -z -f -i -Z -e 100`; `-ggg` takes over 3 minutes on the R manual) and qpdf (when "
-                     "installed) keep every image and page exactly as it was. Ghostscript (`pdfwrite`) rebuilds "
-                     "the file and re-encodes images, so it is not lossless and is shown for reference only.")
+                     + "\n\nk-pdf (`compress`, its default effort; `--best` is smaller still and slower), MuPDF "
+                     "(`mutool clean -gg -z -f -i -Z -e 100`; `-ggg` takes over 3 minutes on the R manual) and qpdf "
+                     "(when installed) keep every image and page exactly as it was. k-pdf recompresses images; MuPDF "
+                     "copies them as they are, which is faster on files that are mostly images. Ghostscript "
+                     "(`pdfwrite`) rebuilds the file and re-encodes images, so it is not lossless and is shown for "
+                     "reference only.")
     if "merge" in R:
         m = R["merge"]["tools"]
         stem = bar_chart(plt, "merge", f"Merging {R['merge']['inputs']} files ({R['merge']['pages']:,} pages)", [

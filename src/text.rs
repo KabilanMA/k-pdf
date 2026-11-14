@@ -8,7 +8,7 @@
 //! [`TextExtractor::extract_chars`] also reports where each character is on
 //! the page, which is what a viewer needs for text selection.
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::rc::Rc;
 
 use crate::document::{Document, Page};
@@ -63,7 +63,7 @@ pub struct TextExtractor<'d> {
 
 impl<'d> TextExtractor<'d> {
     pub fn new(doc: &'d Document) -> Self {
-        TextExtractor { doc, fonts: HashMap::new() }
+        TextExtractor { doc, fonts: HashMap::default() }
     }
 
     pub fn extract_page(&mut self, page: &Page) -> Result<String> {

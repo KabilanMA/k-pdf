@@ -285,7 +285,7 @@ impl SystemFace {
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut enc, &program).ok()?;
         file_dict.set(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
-        let file = add(Object::Stream(crate::object::Stream { dict: file_dict, raw: enc.finish().ok()? }));
+        let file = add(Object::Stream(crate::object::Stream { dict: file_dict, raw: enc.finish().ok()?.into() }));
 
         let bbox = face.global_bounding_box();
         let mut flags = 32; // nonsymbolic
@@ -357,7 +357,7 @@ impl SystemFace {
             cmap += "endbfchar\n";
         }
         cmap += "endcmap CMapName currentdict /CMap defineresource pop end end\n";
-        let to_unicode = add(Object::Stream(crate::object::Stream { dict: Dictionary::new(), raw: cmap.into_bytes() }));
+        let to_unicode = add(Object::Stream(crate::object::Stream { dict: Dictionary::new(), raw: cmap.into_bytes().into() }));
 
         let mut font = Dictionary::new();
         font.set(b"Type".to_vec(), Object::Name(b"Font".to_vec()));

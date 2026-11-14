@@ -236,7 +236,7 @@ fn luma(r: u8, g: u8, b: u8) -> u8 {
 
 fn decode_jpeg(data: &[u8]) -> Result<Image> {
     let fail = |e: &dyn std::fmt::Display| Error::Image(format!("the JPEG image is damaged ({e})"));
-    let mut decoder = jpeg_decoder::Decoder::new(data);
+    let mut decoder = crate::jpeg::Decoder::new(data);
     decoder.read_info().map_err(|e| fail(&e))?;
     let info = decoder.info().ok_or_else(|| fail(&"no image"))?;
     if info.width as u64 * info.height as u64 > MAX_PIXELS {
@@ -244,11 +244,11 @@ fn decode_jpeg(data: &[u8]) -> Result<Image> {
     }
     let pixels = decoder.decode().map_err(|e| fail(&e))?;
     let (channels, pixels) = match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => (1, pixels),
-        jpeg_decoder::PixelFormat::L16 => (1, pixels.chunks_exact(2).map(|p| p[0]).collect()),
-        jpeg_decoder::PixelFormat::RGB24 => (3, pixels),
+        crate::jpeg::PixelFormat::L8 => (1, pixels),
+        crate::jpeg::PixelFormat::L16 => (1, pixels.chunks_exact(2).map(|p| p[0]).collect()),
+        crate::jpeg::PixelFormat::RGB24 => (3, pixels),
         // Adobe CMYK JPEGs store inverted values.
-        jpeg_decoder::PixelFormat::CMYK32 => (
+        crate::jpeg::PixelFormat::CMYK32 => (
             3,
             pixels
                 .chunks_exact(4)
@@ -266,12 +266,12 @@ fn decode_jpeg(data: &[u8]) -> Result<Image> {
 /// A JPEG's size and whether it is gray, when it can be put in a PDF as
 /// it is (gray or color, 8 bits; not CMYK).
 fn jpeg_info(data: &[u8]) -> Option<(u32, u32, bool)> {
-    let mut decoder = jpeg_decoder::Decoder::new(data);
+    let mut decoder = crate::jpeg::Decoder::new(data);
     decoder.read_info().ok()?;
     let info = decoder.info()?;
     let gray = match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => true,
-        jpeg_decoder::PixelFormat::RGB24 => false,
+        crate::jpeg::PixelFormat::L8 => true,
+        crate::jpeg::PixelFormat::RGB24 => false,
         _ => return None,
     };
     Some((info.width as u32, info.height as u32, gray))

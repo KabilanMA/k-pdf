@@ -80,6 +80,7 @@ k-pdf also comes with **k-pdf-cli** for scripts and batch jobs: merge, reorder, 
 k-pdf-cli merge   combined.pdf a.pdf b.pdf
 k-pdf-cli redact  in.pdf out.pdf --text "Jane Doe"
 k-pdf-cli compress in.pdf smaller.pdf
+k-pdf-cli compress in.pdf smallest.pdf --best           # tries harder: smaller, slower
 k-pdf-cli images  album.pdf photo1.jpg drawing.png
 k-pdf-cli scan    receipts.pdf photo1.jpg photo2.jpg --mode bw
 k-pdf-cli scan    clean-notes.pdf notes.pdf --handwriting
@@ -103,15 +104,15 @@ k-pdf compared with [MuPDF](https://mupdf.com), [poppler](https://poppler.freede
 
 | Task | k-pdf | MuPDF | poppler | Ghostscript |
 |---|--:|--:|--:|--:|
-| Render a page (time) | **93 ms** | 94 ms | 186 ms | 131 ms |
-| Render a page (peak memory) | 47 MB | 65 MB | **43 MB** | 55 MB |
+| Render a page (time) | **37 ms** | 93 ms | 186 ms | 132 ms |
+| Render a page (peak memory) | **27 MB** | 65 MB | 43 MB | 55 MB |
 | Pixels matching MuPDF's render | **98.3%** | reference | 97.2% | 96.8% |
-| Extract all text (time) | **87 ms** | 655 ms | 542 ms | – |
-| Extract all text (peak memory) | **25 MB** | 54 MB | 39 MB | – |
-| Merge 5 files, 4,544 pages (time) | **549 ms** | 1.1 s | 3.7 s | – |
-| Merge (peak memory) | **117 MB** | 190 MB | 143 MB | – |
-| Lossless compression (output size) | **93.6%** | 99.0% | – | – |
-| Lossless compression (time) | 7.3 s | **66 ms** | – | – |
+| Extract all text (time) | **64 ms** | 649 ms | 548 ms | – |
+| Extract all text (peak memory) | **14 MB** | 54 MB | 40 MB | – |
+| Merge 5 files, 4,544 pages (time) | **365 ms** | 1.1 s | 3.7 s | – |
+| Merge (peak memory) | **134 MB** | 190 MB | 143 MB | – |
+| Lossless compression (output size) | **97.8%** | 99.0% | – | – |
+| Lossless compression (time) | 84 ms | **70 ms** | – | – |
 
 Times are the median of several runs after a warm-up, as the wall-clock time of the whole command (starting the program, opening the file and writing the result). Values across documents are geometric means. Memory is the peak resident memory of the process.
 
@@ -140,7 +141,7 @@ Each tool is started once per page and writes a PNG at 144 dpi; the pages are sp
   <img alt="Compressed size and time per document" src="bench/results/compress-light.svg">
 </picture>
 
-k-pdf (`compress`), MuPDF (`mutool clean -gg -z -f -i -Z -e 100`; `-ggg` takes over 3 minutes on the R manual) and qpdf (when installed) keep every image and page exactly as it was. Ghostscript (`pdfwrite`) rebuilds the file and re-encodes images, so it is not lossless and is shown for reference only.
+k-pdf (`compress`, its default effort; `--best` is smaller still and slower), MuPDF (`mutool clean -gg -z -f -i -Z -e 100`; `-ggg` takes over 3 minutes on the R manual) and qpdf (when installed) keep every image and page exactly as it was. k-pdf recompresses images; MuPDF copies them as they are, which is faster on files that are mostly images. Ghostscript (`pdfwrite`) rebuilds the file and re-encodes images, so it is not lossless and is shown for reference only.
 
 ### Merging
 
@@ -162,11 +163,11 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 
 | Document | Time to first page | Peak memory |
 |---|--:|--:|
-| Manual | 127 ms | 94 MB |
-| Maps | 175 ms | 104 MB |
-| Symbols | 152 ms | 124 MB |
-| Photo book | 466 ms | 392 MB |
-| R manual | 282 ms | 163 MB |
+| Manual | 115 ms | 95 MB |
+| Maps | 151 ms | 94 MB |
+| Symbols | 143 ms | 122 MB |
+| Photo book | 398 ms | 139 MB |
+| R manual | 234 ms | 166 MB |
 
 <details>
 <summary>All the numbers, per document</summary>
@@ -175,21 +176,21 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 
 | Document | k-pdf | MuPDF | poppler | Ghostscript |
 |---|--:|--:|--:|--:|
-| Manual | 45 ms | **34 ms** | 122 ms | 84 ms |
-| Maps | 185 ms | **83 ms** | 260 ms | 337 ms |
-| Symbols | **57 ms** | 103 ms | 150 ms | 92 ms |
-| Photo book | 179 ms | **134 ms** | 218 ms | 180 ms |
-| R manual | **81 ms** | 185 ms | 213 ms | 83 ms |
+| Manual | **19 ms** | 33 ms | 120 ms | 84 ms |
+| Maps | **60 ms** | 83 ms | 262 ms | 345 ms |
+| Symbols | **22 ms** | 98 ms | 147 ms | 90 ms |
+| Photo book | **122 ms** | 136 ms | 219 ms | 185 ms |
+| R manual | **24 ms** | 189 ms | 218 ms | 83 ms |
 
 **Rendering, peak memory**
 
 | Document | k-pdf | MuPDF | poppler | Ghostscript |
 |---|--:|--:|--:|--:|
-| Manual | **25 MB** | 33 MB | 28 MB | 41 MB |
-| Maps | 37 MB | 43 MB | **30 MB** | 42 MB |
-| Symbols | 35 MB | 59 MB | **32 MB** | 42 MB |
-| Photo book | 173 MB | 153 MB | **139 MB** | 149 MB |
-| R manual | 43 MB | 92 MB | **42 MB** | 45 MB |
+| Manual | **19 MB** | 33 MB | 28 MB | 41 MB |
+| Maps | **27 MB** | 43 MB | 30 MB | 42 MB |
+| Symbols | **23 MB** | 59 MB | 32 MB | 42 MB |
+| Photo book | **49 MB** | 153 MB | 139 MB | 149 MB |
+| R manual | **22 MB** | 92 MB | 42 MB | 45 MB |
 
 **Rendering, pixels that match** (each channel within 24 of 255)
 
@@ -215,21 +216,21 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 
 | Document | k-pdf | MuPDF | poppler |
 |---|--:|--:|--:|
-| Manual | **24 ms** | 379 ms | 119 ms |
-| Maps | **47 ms** | 283 ms | 307 ms |
-| Symbols | **621 ms** | 3.6 s | 7.9 s |
-| Photo book | **8.8 ms** | 30 ms | 27 ms |
-| R manual | **803 ms** | 10.2 s | 6.0 s |
+| Manual | **21 ms** | 381 ms | 124 ms |
+| Maps | **38 ms** | 278 ms | 307 ms |
+| Symbols | **543 ms** | 3.6 s | 7.9 s |
+| Photo book | **3.2 ms** | 29 ms | 27 ms |
+| R manual | **731 ms** | 10.3 s | 6.1 s |
 
 **Text extraction, peak memory**
 
 | Document | k-pdf | MuPDF | poppler |
 |---|--:|--:|--:|
-| Manual | **8.0 MB** | 23 MB | 20 MB |
-| Maps | 32 MB | 54 MB | **23 MB** |
+| Manual | **7.8 MB** | 23 MB | 21 MB |
+| Maps | **11 MB** | 54 MB | 23 MB |
 | Symbols | **42 MB** | 112 MB | 84 MB |
-| Photo book | 33 MB | 34 MB | **20 MB** |
-| R manual | **27 MB** | 95 MB | 122 MB |
+| Photo book | **6.6 MB** | 35 MB | 20 MB |
+| R manual | **26 MB** | 95 MB | 122 MB |
 
 **Text extraction, words in common** (F1 score of the words found)
 
@@ -251,26 +252,26 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 | Document | k-pdf | MuPDF | Ghostscript |
 |---|--:|--:|--:|
 | Manual | **1.1 MB** | 1.2 MB | 0.7 MB |
-| Maps | **23 MB** | 24 MB | 17 MB |
-| Symbols | **20 MB** | 22 MB | 22 MB |
+| Maps | **24 MB** | 24 MB | 17 MB |
+| Symbols | **22 MB** | 22 MB | 22 MB |
 | Photo book | **14 MB** | 14 MB | 14 MB |
-| R manual | **10.0 MB** | 11 MB | 13 MB |
+| R manual | **11 MB** | 11 MB | 13 MB |
 
 **Compression, time**
 
 | Document | k-pdf | MuPDF | Ghostscript |
 |---|--:|--:|--:|
-| Manual | 2.6 s | **12 ms** | 281 ms |
-| Maps | 30.2 s | **45 ms** | 1.8 s |
-| Symbols | 8.2 s | **253 ms** | 12.0 s |
-| Photo book | 5.2 s | **20 ms** | 452 ms |
-| R manual | 6.4 s | **452 ms** | 19.5 s |
+| Manual | 22 ms | **14 ms** | 290 ms |
+| Maps | 115 ms | **49 ms** | 1.9 s |
+| Symbols | 257 ms | **254 ms** | 12.1 s |
+| Photo book | **18 ms** | 23 ms | 475 ms |
+| R manual | **351 ms** | 451 ms | 19.7 s |
 
 **Merging**
 
 | Tool | Time | Peak memory | Output size |
 |---|--:|--:|--:|
-| k-pdf | 549 ms | 117 MB | 72 MB |
+| k-pdf | 365 ms | 134 MB | 72 MB |
 | MuPDF | 1.1 s | 190 MB | 74 MB |
 | poppler | 3.7 s | 143 MB | 88 MB |
 
@@ -278,11 +279,11 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 
 | Document | k-pdf | MuPDF | Evince | Papers |
 |---|--:|--:|--:|--:|
-| Manual | 91 MB | **27 MB** | 122 MB | 200 MB |
-| Maps | 102 MB | **33 MB** | 123 MB | 199 MB |
-| Symbols | 122 MB | **52 MB** | 186 MB | 268 MB |
-| Photo book | 390 MB | **25 MB** | 296 MB | 345 MB |
-| R manual | 160 MB | **90 MB** | 231 MB | 297 MB |
+| Manual | 92 MB | **27 MB** | 122 MB | 201 MB |
+| Maps | 94 MB | **33 MB** | 123 MB | 200 MB |
+| Symbols | 121 MB | **52 MB** | 186 MB | 269 MB |
+| Photo book | 138 MB | **25 MB** | 295 MB | 346 MB |
+| R manual | 158 MB | **90 MB** | 231 MB | 297 MB |
 
 **Documents** (listed in [bench/corpus.txt](bench/corpus.txt))
 
@@ -296,7 +297,7 @@ Each viewer opens the document and is left alone for 5 seconds; the chart shows 
 
 </details>
 
-Measured on 2026-11-13 on Intel(R) Core(TM) Ultra 7 265 (20 threads, 31 GB RAM), Fedora Linux 43 (Workstation Edition), Linux 7.0.13-100.fc43.x86_64, with k-pdf v0.1.3-1-g362f63e, MuPDF 1.27.2, poppler 25.07.0, Ghostscript 10.05.1, Evince 48.1, Papers 49.6. Rerun with `python3 bench/bench.py` (see the top of [bench/bench.py](bench/bench.py) for the options); it rebuilds k-pdf, measures everything again, redraws the charts and rewrites this section.
+Measured on 2026-11-13 on Intel(R) Core(TM) Ultra 7 265 (20 threads, 31 GB RAM), Fedora Linux 43 (Workstation Edition), Linux 7.0.13-100.fc43.x86_64, with k-pdf v0.1.3-2-g0bec90a-dirty, MuPDF 1.27.2, poppler 25.07.0, Ghostscript 10.05.1, Evince 48.1, Papers 49.6. Rerun with `python3 bench/bench.py` (see the top of [bench/bench.py](bench/bench.py) for the options); it rebuilds k-pdf, measures everything again, redraws the charts and rewrites this section.
 
 <!-- benchmarks:end -->
 

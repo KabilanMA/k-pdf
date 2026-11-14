@@ -351,7 +351,7 @@ pub(super) fn appearance(bbox: [f64; 4], resources: Dictionary, content: String)
     d.set(b"BBox".to_vec(), Object::Array(bbox.map(real).to_vec()));
     d.set(b"Resources".to_vec(), Object::Dictionary(resources));
     d.set(b"Length".to_vec(), Object::Integer(content.len() as i64));
-    Stream { dict: d, raw: content.into_bytes() }
+    Stream { dict: d, raw: content.into_bytes().into() }
 }
 
 /// Adds annotation `dict` (with appearance `ap`) to page `p`.

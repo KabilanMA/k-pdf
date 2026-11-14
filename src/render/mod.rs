@@ -16,7 +16,7 @@ pub(crate) mod image;
 mod shading;
 mod type1;
 
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 use std::rc::Rc;
 
 use tiny_skia::{
@@ -71,7 +71,7 @@ impl<'d> Renderer<'d> {
     pub fn new(doc: &'d Document) -> Self {
         Renderer {
             doc,
-            fonts: HashMap::new(),
+            fonts: HashMap::default(),
             system_fonts: SystemFonts::default(),
             hidden_layers: hidden_layers(doc),
             hide_form_fields: false,
@@ -548,7 +548,14 @@ impl<'d> Renderer<'d> {
             Some([a, b, c, d]) => Rect::from_ltrb(a.min(c) as f32, b.min(d) as f32, a.max(c) as f32, b.max(d) as f32)
                 .map(PathBuilder::from_rect)
                 .and_then(|p| p.transform(to_ts(&gs.ctm))),
-            None => Rect::from_xywh(0.0, 0.0, canvas.width() as f32, canvas.height() as f32).map(PathBuilder::from_rect),
+            // Only the clipped area can change: fill just its bounds.
+            None => {
+                let (w, h) = (canvas.width() as f32, canvas.height() as f32);
+                let [l, t, r, b] = gs.clip_bounds.unwrap_or([0.0, 0.0, w, h]);
+                let (l, t) = ((l - 1.0).floor().max(0.0), (t - 1.0).floor().max(0.0));
+                let (r, b) = ((r + 1.0).ceil().min(w), (b + 1.0).ceil().min(h));
+                Rect::from_ltrb(l, t, r, b).map(PathBuilder::from_rect)
+            }
         };
         let Some(area) = area else { return };
         let Some((area, ts)) = safe_path(&area, Transform::identity(), canvas) else { return };
@@ -974,7 +981,7 @@ impl<'d> Renderer<'d> {
 
 /// Layers switched off in the default view configuration.
 fn hidden_layers(doc: &Document) -> HashSet<ObjRef> {
-    let mut hidden = HashSet::new();
+    let mut hidden = HashSet::default();
     let Ok(catalog) = doc.catalog() else { return hidden };
     let Some(props) = doc.get_dict(&catalog, b"OCProperties") else { return hidden };
     let Some(d) = doc.get_dict(&props, b"D") else { return hidden };
@@ -1044,6 +1051,10 @@ struct GState {
     dash: Option<(Vec<f32>, f32)>,
     /// Geometric clip (W/W*, form BBox).
     clip: Option<Rc<Mask>>,
+    /// Device-space bounds of `clip` (left, top, right, bottom), so painting
+    /// that would cover the whole page (`sh` without a `/BBox`) only covers
+    /// the clipped area.
+    clip_bounds: Option<[f32; 4]>,
     /// Soft mask from an ExtGState `/SMask`.
     smask: Option<Rc<Mask>>,
     /// clip × smask: what painting operations are masked with.
@@ -1086,6 +1097,7 @@ impl GState {
             miter: 10.0,
             dash: None,
             clip: None,
+            clip_bounds: None,
             smask: None,
             mask: None,
             blend: BlendMode::SourceOver,
@@ -1120,6 +1132,7 @@ fn intersect_clip(canvas: &Pixmap, gs: &mut GState, path: Option<&Path>, rule: F
     let (w, h) = (canvas.width(), canvas.height());
     let Some(path) = path else {
         gs.clip = Mask::new(w, h).map(Rc::new);
+        gs.clip_bounds = Some([0.0; 4]);
         gs.refresh_mask();
         return;
     };
@@ -1129,10 +1142,14 @@ fn intersect_clip(canvas: &Pixmap, gs: &mut GState, path: Option<&Path>, rule: F
     }
     let Some((path, ts)) = safe_path(path, ts, canvas) else {
         gs.clip = Mask::new(w, h).map(Rc::new);
+        gs.clip_bounds = Some([0.0; 4]);
         gs.refresh_mask();
         return;
     };
     let path = path.as_ref();
+    let b = transformed_bounds(path.bounds(), ts);
+    let [l, t, r, bt] = gs.clip_bounds.unwrap_or([0.0, 0.0, w as f32, h as f32]);
+    gs.clip_bounds = Some([b[0].max(l), b[1].max(t), b[2].min(r).max(b[0].max(l)), b[3].min(bt).max(b[1].max(t))]);
     let mask = match &gs.clip {
         Some(existing) => {
             let mut m = (**existing).clone();
@@ -1147,6 +1164,17 @@ fn intersect_clip(canvas: &Pixmap, gs: &mut GState, path: Option<&Path>, rule: F
     };
     gs.clip = Some(Rc::new(mask));
     gs.refresh_mask();
+}
+
+/// The bounding box of `bounds` transformed by `ts`.
+fn transformed_bounds(bounds: Rect, ts: Transform) -> [f32; 4] {
+    let mut out = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+    for (x, y) in [(bounds.left(), bounds.top()), (bounds.right(), bounds.top()), (bounds.left(), bounds.bottom()), (bounds.right(), bounds.bottom())] {
+        let dx = ts.sx * x + ts.kx * y + ts.tx;
+        let dy = ts.ky * x + ts.sy * y + ts.ty;
+        out = [out[0].min(dx), out[1].min(dy), out[2].max(dx), out[3].max(dy)];
+    }
+    out
 }
 
 /// Device coordinates beyond this distance from the canvas get clipped
@@ -1393,7 +1421,7 @@ fn read_inline_image(parser: &mut Parser) -> Option<Stream> {
         resume += 1;
     }
     parser.lex.set_pos(resume + 2);
-    Some(Stream { dict, raw })
+    Some(Stream { dict, raw: raw.into() })
 }
 
 fn expand_inline_key(key: &[u8]) -> &[u8] {

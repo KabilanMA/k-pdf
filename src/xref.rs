@@ -7,7 +7,7 @@
 //! 3. reconstruction by scanning the whole file for `N G obj`, used when
 //!    the above is missing or damaged — common with old or truncated files.
 
-use std::collections::{HashMap, HashSet};
+use crate::hash::{HashMap, HashSet};
 
 use crate::error::{Error, Result};
 use crate::filters;
@@ -53,8 +53,8 @@ const MAX_OBJECTS: u64 = 8_388_607;
 pub fn load(data: &[u8], header_offset: usize) -> Result<XrefTable> {
     let start = find_startxref(data).ok_or_else(|| Error::parse(data.len(), "startxref not found"))?;
     let mut table = XrefTable::default();
-    let mut seen_objects = HashSet::new();
-    let mut visited = HashSet::new();
+    let mut seen_objects = HashSet::default();
+    let mut visited = HashSet::default();
     let mut next = Some(start);
 
     while let Some(offset) = next.take() {
@@ -169,7 +169,7 @@ fn read_classic_table(mut lex: Lexer, table: &mut XrefTable, seen: &mut HashSet<
             _ => return Err(Error::parse(lex.pos(), "expected xref subsection or 'trailer'")),
         }
     }
-    let mut parser = Parser { lex };
+    let mut parser = Parser::from_lexer(lex);
     match parser.parse_object()? {
         Object::Dictionary(d) => Ok(d),
         _ => Err(Error::parse(parser.lex.pos(), "trailer is not a dictionary")),

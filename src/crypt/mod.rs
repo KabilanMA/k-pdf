@@ -173,7 +173,7 @@ impl Crypt {
                 walk(&mut stream.dict, &mut strings);
                 if self.stream_is_encrypted(stream) {
                     let key = self.object_key(num, generation, self.streams);
-                    stream.raw = crypt(self.streams, &key, std::mem::take(&mut stream.raw), encrypt);
+                    stream.raw = crypt(self.streams, &key, std::mem::take(&mut stream.raw).into_vec(), encrypt).into();
                 }
             }
             Object::Dictionary(d) => walk(d, &mut strings),

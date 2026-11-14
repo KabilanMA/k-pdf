@@ -659,7 +659,7 @@ pub(crate) fn appearance(doc: &Document, field: &FormField, value: &FieldValue, 
         dict.set(b"Matrix".to_vec(), Object::Array(matrix.map(|v: f32| Object::Real(v as f64)).to_vec()));
     }
     dict.set(b"Resources".to_vec(), Object::Dictionary(resources));
-    Some(Stream { dict, raw: ops.into_bytes() })
+    Some(Stream { dict, raw: ops.into_bytes().into() })
 }
 
 fn label_of(options: &[ChoiceOption], value: &str) -> String {

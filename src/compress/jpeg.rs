@@ -42,7 +42,7 @@ pub(crate) fn optimize(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Decoded pixels (and their layout), for comparing.
 fn pixels(data: &[u8]) -> Option<(Vec<u8>, u16, u16)> {
-    let mut d = jpeg_decoder::Decoder::new(data);
+    let mut d = crate::jpeg::Decoder::new(data);
     let px = d.decode().ok()?;
     let info = d.info()?;
     Some((px, info.width, info.height))

@@ -2,7 +2,7 @@
 //! Font Format specification: eexec decryption, charstring decryption and
 //! the Type 1 charstring interpreter.
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 use tiny_skia::{Path, PathBuilder};
 
@@ -160,7 +160,7 @@ type PrivateParts = (Vec<Vec<u8>>, HashMap<Vec<u8>, Vec<u8>>);
 
 fn parse_private(private: &[u8], len_iv: i64) -> PrivateParts {
     let mut subrs: Vec<Vec<u8>> = Vec::new();
-    let mut charstrings = HashMap::new();
+    let mut charstrings = HashMap::default();
     let mut lex = Lexer::new(private, 0);
     // The last few tokens; only the trailing 3 matter.
     let mut hist: Vec<Token> = Vec::new();

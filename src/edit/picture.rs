@@ -124,7 +124,7 @@ fn flate_stream(mut dict: Dictionary, data: &[u8]) -> Result<Stream> {
     dict.set(b"Filter".to_vec(), Object::Name(b"FlateDecode".to_vec()));
     let raw = enc.finish()?;
     dict.set(b"Length".to_vec(), Object::Integer(raw.len() as i64));
-    Ok(Stream { dict, raw })
+    Ok(Stream { dict, raw: raw.into() })
 }
 
 #[cfg(test)]

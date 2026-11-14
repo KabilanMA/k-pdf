@@ -16,6 +16,10 @@
 //! ```
 
 mod ccitt;
+mod hash;
+// JPEG decoding (jpeg-decoder, made part of k-pdf: see the module).
+#[cfg(any(feature = "render", feature = "compress"))]
+mod jpeg;
 mod crypt;
 #[cfg(feature = "compress")]
 pub mod compress;
@@ -41,6 +45,8 @@ mod std14;
 mod text;
 mod writer;
 mod xref;
+#[doc(hidden)]
+pub mod zlib;
 
 pub use document::{Document, Metadata, Page};
 pub use encoding::decode_text_string;

@@ -2,7 +2,7 @@
 //! bytes split into character codes, what text each code means, and glyph
 //! advance widths (ISO 32000 §9.5–9.10).
 
-use std::collections::HashMap;
+use crate::hash::HashMap;
 
 use crate::document::Document;
 use crate::encoding::{glyph_name_to_unicode, BaseEncoding};
@@ -68,9 +68,9 @@ impl Font {
             symbolic: flags & 4 != 0,
             composite,
             codespace: Vec::new(),
-            to_unicode: HashMap::new(),
+            to_unicode: HashMap::default(),
             encoding: Vec::new(),
-            widths: HashMap::new(),
+            widths: HashMap::default(),
             default_width: 0.0,
             width_scale: 0.001,
         };
@@ -85,7 +85,7 @@ impl Font {
             if let Ok(Object::Stream(s)) = doc.get_resolved(dict, b"Encoding")
                 && let Ok(data) = doc.decode_stream(&s) {
                     let mut cs = Vec::new();
-                    parse_cmap(&data, &mut HashMap::new(), &mut cs);
+                    parse_cmap(&data, &mut HashMap::default(), &mut cs);
                     if !cs.is_empty() {
                         font.codespace = cs;
                     }
@@ -367,7 +367,7 @@ mod tests {
         let cmap = b"1 begincodespacerange <0000> <FFFF> endcodespacerange
             2 beginbfchar <0003> <0020> <0011> <00660069> endbfchar
             2 beginbfrange <0024> <0026> <0041> <0030> <0031> [<0061> <0062>] endbfrange";
-        let mut map = HashMap::new();
+        let mut map = HashMap::default();
         let mut cs = Vec::new();
         parse_cmap(cmap, &mut map, &mut cs);
         assert_eq!(cs, vec![(2, 0, 0xFFFF)]);

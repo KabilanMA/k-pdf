@@ -6,7 +6,7 @@
 //! instead of failing.
 
 use crate::error::{Error, Result};
-use crate::object::{is_delimiter, is_whitespace, Dictionary, ObjRef, Object, Stream};
+use crate::object::{is_delimiter, is_whitespace, Bytes, Dictionary, ObjRef, Object, SharedData, Stream};
 
 /// Nesting limit for arrays/dictionaries, protecting against stack overflow
 /// on malicious input.
@@ -304,11 +304,41 @@ pub(crate) type LengthResolver<'r> = &'r dyn Fn(ObjRef) -> Option<i64>;
 
 pub(crate) struct Parser<'a> {
     pub lex: Lexer<'a>,
+    /// The file the data belongs to, for streams to point into.
+    shared: Option<&'a SharedData>,
+    /// Where `data` starts in that file (it may be a window onto it).
+    base: usize,
+    /// Where the last object parsed by `parse_indirect` ended, in `data`
+    /// (for a stream, where its data starts).
+    header_end: usize,
 }
 
 impl<'a> Parser<'a> {
     pub fn new(data: &'a [u8], pos: usize) -> Self {
-        Parser { lex: Lexer::new(data, pos) }
+        Parser { lex: Lexer::new(data, pos), shared: None, base: 0, header_end: 0 }
+    }
+
+    /// A parser continuing where `lex` is.
+    pub(crate) fn from_lexer(lex: Lexer<'a>) -> Self {
+        Parser { lex, shared: None, base: 0, header_end: 0 }
+    }
+
+    /// A parser over `shared`'s bytes whose streams point into them instead
+    /// of copying their data.
+    pub(crate) fn new_shared(data: &'a [u8], shared: &'a SharedData, pos: usize) -> Self {
+        Parser { lex: Lexer::new(data, pos), shared: Some(shared), base: 0, header_end: 0 }
+    }
+
+    /// A parser over `window`, a copy of `shared`'s bytes from `base` on,
+    /// starting at its beginning. Streams still point into `shared`.
+    pub(crate) fn new_window(window: &'a [u8], shared: &'a SharedData, base: usize) -> Self {
+        Parser { lex: Lexer::new(window, 0), shared: Some(shared), base, header_end: 0 }
+    }
+
+    /// Where the last object read by `parse_indirect` ended in the data
+    /// (for a stream, where its bytes begin).
+    pub(crate) fn header_end(&self) -> usize {
+        self.header_end
     }
 
     fn err(&self, msg: impl Into<String>) -> Error {
@@ -419,13 +449,20 @@ impl<'a> Parser<'a> {
 
         // An empty object (`1 0 obj endobj`) is null.
         if matches!(self.lex.peek(), Some(Token::Keyword(b"endobj"))) {
+            self.header_end = self.lex.pos();
             return Ok((id, Object::Null));
         }
         let obj = self.parse_object()?;
+        self.header_end = self.lex.pos();
         if let Object::Dictionary(dict) = obj {
             if matches!(self.lex.peek(), Some(Token::Keyword(b"stream"))) {
                 self.lex.next_token();
-                let raw = self.read_stream_data(&dict, resolve_length);
+                self.header_end = self.lex.pos();
+                let range = self.read_stream_data(&dict, resolve_length);
+                let raw = match self.shared {
+                    Some(shared) => Bytes::shared(shared.clone(), range),
+                    None => self.lex.data()[range].to_vec().into(),
+                };
                 return Ok((id, Object::Stream(Stream { dict, raw })));
             }
             return Ok((id, Object::Dictionary(dict)));
@@ -434,19 +471,29 @@ impl<'a> Parser<'a> {
     }
 
     /// Reads stream bytes; the lexer is positioned just after `stream`.
-    fn read_stream_data(&mut self, dict: &Dictionary, resolve_length: LengthResolver) -> Vec<u8> {
-        let data = self.lex.data();
+    /// Where the stream's bytes are: in the file when there is one (the
+    /// data may be only a window onto it), else in the data.
+    fn read_stream_data(&mut self, dict: &Dictionary, resolve_length: LengthResolver) -> std::ops::Range<usize> {
+        let local = self.lex.data();
         let mut start = self.lex.pos();
         // Spec: `stream` is followed by CRLF or LF. Tolerate spaces and a
         // lone CR as well.
-        while matches!(data.get(start), Some(b' ' | b'\t')) {
+        while matches!(local.get(start), Some(b' ' | b'\t')) {
             start += 1;
         }
-        match data.get(start) {
-            Some(b'\r') if data.get(start + 1) == Some(&b'\n') => start += 2,
+        match local.get(start) {
+            Some(b'\r') if local.get(start + 1) == Some(&b'\n') => start += 2,
             Some(b'\r' | b'\n') => start += 1,
             _ => {}
         }
+        // From here on, positions are in the whole file. Taking the slice
+        // reads nothing.
+        let data: &[u8] = match self.shared {
+            Some(file) => file.bytes(),
+            None => local,
+        };
+        let base = self.base;
+        let start = base + start;
 
         let declared = match dict.get(b"Length") {
             Some(Object::Reference(r)) => resolve_length(*r),
@@ -457,17 +504,32 @@ impl<'a> Parser<'a> {
         // Trust /Length only if `endstream` really follows it.
         if let Some(len) = declared.and_then(|l| usize::try_from(l).ok())
             && let Some(end) = start.checked_add(len).filter(|&e| e <= data.len()) {
-                let mut p = end;
-                while data.get(p).is_some_and(|&b| is_whitespace(b)) {
-                    p += 1;
-                }
-                if data[p..].starts_with(b"endstream") {
-                    self.lex.set_pos(p + b"endstream".len());
-                    return data[start..end].to_vec();
+                // Read what follows through the file when there is one (see
+                // `FileData::peek`), so the stream's own pages aren't touched.
+                let mut buf = [0u8; 64];
+                let after = match self.shared {
+                    Some(file) => {
+                        let n = file.peek(end, &mut buf);
+                        let ws = buf[..n].iter().take_while(|&&b| is_whitespace(b)).count();
+                        (ws < n).then(|| (end + ws, buf[ws..n].starts_with(b"endstream")))
+                    }
+                    None => None,
+                };
+                let (p, found) = after.unwrap_or_else(|| {
+                    let mut p = end;
+                    while data.get(p).is_some_and(|&b| is_whitespace(b)) {
+                        p += 1;
+                    }
+                    (p, data[p..].starts_with(b"endstream"))
+                });
+                if found {
+                    self.lex.set_pos((p + b"endstream".len()).saturating_sub(base));
+                    return start..end;
                 }
             }
 
         // Fallback: scan for `endstream` and drop the EOL before it.
+        let start = start.min(data.len());
         let (mut end, after) = match find(&data[start..], b"endstream") {
             Some(i) => (start + i, start + i + b"endstream".len()),
             None => (data.len(), data.len()),
@@ -478,8 +540,8 @@ impl<'a> Parser<'a> {
         if end > start && data[end - 1] == b'\r' {
             end -= 1;
         }
-        self.lex.set_pos(after);
-        data[start..end].to_vec()
+        self.lex.set_pos(after.saturating_sub(base));
+        start..end
     }
 }
 

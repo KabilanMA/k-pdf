@@ -26,7 +26,7 @@ USAGE:
     k-pdf-cli edit    <in.pdf> <out.pdf> <page> <block> <new text>
     k-pdf-cli redact  <in.pdf> <out.pdf> <page> <left> <top> <right> <bottom>
     k-pdf-cli redact  <in.pdf> <out.pdf> --text <words> [pages]
-    k-pdf-cli compress <in.pdf> <out.pdf> [--brotli] [--no-jpeg]
+    k-pdf-cli compress <in.pdf> <out.pdf> [--best] [--no-jpeg] [--brotli]
     k-pdf-cli fill    <in.pdf> <out.pdf> <name=value>...
     k-pdf-cli blank   <out.pdf> [letter|a4|<width>x<height>]
     k-pdf-cli add-field <in.pdf> <out.pdf> <text|check|dropdown> <name> <page> <left> <top> <right> <bottom>
@@ -88,9 +88,10 @@ COMMANDS:
              \"1,3-5\"): text, image pixels, shapes and annotations there are removed
              and a black box is drawn in their place
     compress Make a smaller copy without losing anything: duplicates merged, streams
-             recompressed (libdeflate), JPEGs optimized losslessly (MozJPEG; --no-jpeg
-             skips this). --brotli also allows Brotli compression (PDF 2.0 extension):
-             smaller still, but many PDF readers can't open such files
+             recompressed (libdeflate, on all cores). --best tries harder: the highest
+             Deflate level and JPEGs optimized losslessly (MozJPEG; --no-jpeg skips
+             this), several times slower. --brotli also allows Brotli compression (PDF
+             2.0 extension): smaller still, but many PDF readers can't open such files
     search   Find words: each place with its page and the text around it. Case and
              line breaks are ignored (--case matches case; --words whole words
              only). Text in images (scans, photos, figures) is read too, unless
@@ -508,6 +509,7 @@ fn compress(args: &[String]) -> CliResult {
         match flag.as_str() {
             "--brotli" => options.brotli = true,
             "--no-jpeg" => options.jpeg = false,
+            "--best" => options.effort = k_pdf::compress::Effort::Best,
             other => return Err(format!("unknown option {other}").into()),
         }
     }
@@ -1089,15 +1091,78 @@ fn render(args: &[String]) -> CliResult {
         }
     }
     let doc = open_pdf(path)?;
-    let pages = doc.pages()?;
-    let page = pages.get(page.wrapping_sub(1)).ok_or("page out of range")?;
+    let page = doc.page(page.wrapping_sub(1))?.ok_or("page out of range")?;
     let start = std::time::Instant::now();
     let mut renderer = k_pdf::Renderer::new(&doc);
     renderer.set_dark_pages(dark);
-    let img = renderer.render_page(page, scale)?;
+    let img = renderer.render_page(&page, scale)?;
     eprintln!("rendered {}x{} in {:.0} ms", img.width, img.height, start.elapsed().as_secs_f64() * 1000.0);
-    let size = tiny_skia::IntSize::from_wh(img.width, img.height).ok_or("bad size")?;
-    let pixmap = tiny_skia::Pixmap::from_vec(img.pixels, size).ok_or("bad pixmap")?;
-    pixmap.save_png(out)?;
+    write_png(out, img.width, img.height, &img.pixels)?;
     Ok(())
+}
+
+/// Writes premultiplied RGBA pixels as a PNG: RGB when every pixel is
+/// opaque (a rendered page usually is), each row filtered with "Up" (good
+/// for pages, whose rows mostly repeat the one above) and compressed at a
+/// fast level on all cores. tiny-skia's encoder compresses harder on one
+/// core and took about half the time of `render`.
+#[cfg(feature = "render")]
+fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let opaque = rgba.chunks_exact(4).all(|p| p[3] == 255);
+    let channels = if opaque { 3 } else { 4 };
+    let (w, h) = (width as usize, height as usize);
+    let stride = w * channels;
+    // Row `y` unpremultiplied, in the output's channels.
+    let unpack = |y: usize, row: &mut [u8]| {
+        for (out, px) in row.chunks_exact_mut(channels).zip(rgba[y * w * 4..(y + 1) * w * 4].chunks_exact(4)) {
+            let a = px[3] as u32;
+            for c in 0..3 {
+                out[c] = if opaque || a == 255 { px[c] } else if a == 0 { 0 } else { ((px[c] as u32 * 255 + a / 2) / a).min(255) as u8 };
+            }
+            if !opaque {
+                out[3] = px[3];
+            }
+        }
+    };
+    // Rows are filtered and compressed piece by piece on several threads,
+    // so the filtered image is never in memory as a whole.
+    let pieces = k_pdf::zlib::pieces_for((stride + 1) * h).min(h.max(1));
+    let rows_per = h.div_ceil(pieces).max(1);
+    let idat = k_pdf::zlib::compress_pieces(pieces, 2, |i, feed| {
+        let (mut prev, mut row, mut line) = (vec![0u8; stride], vec![0u8; stride], vec![0u8; stride + 1]);
+        let first = i * rows_per;
+        if first > 0 && first < h {
+            unpack(first - 1, &mut prev);
+        }
+        for y in first..(first + rows_per).min(h) {
+            unpack(y, &mut row);
+            line[0] = 2; // Up
+            for ((o, &v), &up) in line[1..].iter_mut().zip(&row).zip(&prev) {
+                *o = v.wrapping_sub(up);
+            }
+            feed(&line);
+            std::mem::swap(&mut prev, &mut row);
+        }
+    });
+
+    let mut file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    file.write_all(b"\x89PNG\r\n\x1a\n")?;
+    let chunk = |file: &mut std::io::BufWriter<std::fs::File>, kind: &[u8; 4], data: &[u8]| -> std::io::Result<()> {
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        file.write_all(&(data.len() as u32).to_be_bytes())?;
+        file.write_all(kind)?;
+        file.write_all(data)?;
+        file.write_all(&crc.sum().to_be_bytes())
+    };
+    let mut ihdr = Vec::with_capacity(13);
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, if opaque { 2 } else { 6 }, 0, 0, 0]); // 8-bit RGB or RGBA
+    chunk(&mut file, b"IHDR", &ihdr)?;
+    chunk(&mut file, b"IDAT", &idat)?;
+    chunk(&mut file, b"IEND", &[])?;
+    file.flush()
 }

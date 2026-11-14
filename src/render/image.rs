@@ -65,7 +65,18 @@ pub(crate) fn decode(
     let int = |k: &[u8]| doc.get_resolved(dict, k).ok().and_then(|o| o.as_i64());
     let is_mask = doc.get_resolved(dict, b"ImageMask").ok().and_then(|o| o.as_bool()).unwrap_or(false);
 
-    let decoded = doc.decode_stream_full(stream).ok()?;
+    // A plain JPEG (the usual case for photos) is decoded straight from the
+    // file's bytes, not from a copy of them.
+    let only_dct = match doc.get_resolved(dict, b"Filter") {
+        Ok(Object::Name(n)) => n == b"DCTDecode" || n == b"DCT",
+        Ok(Object::Array(a)) => a.len() == 1 && matches!(a[0].as_name(), Some(b"DCTDecode" | b"DCT")),
+        _ => false,
+    };
+    let decoded = if only_dct {
+        crate::filters::Decoded { data: Vec::new(), remaining_filter: Some(b"DCTDecode".to_vec()) }
+    } else {
+        doc.decode_stream_full(stream).ok()?
+    };
     let mut space = None;
     let samples = match decoded.remaining_filter.as_deref() {
         None => {
@@ -79,7 +90,7 @@ pub(crate) fn decode(
             Samples { data: decoded.data, width, height, comps, bpc }
         }
         Some(b"DCTDecode" | b"DCT") => {
-            let s = decode_jpeg(&decoded.data, target)?;
+            let s = decode_jpeg(if only_dct { &stream.raw } else { &decoded.data }, target)?;
             if !is_mask {
                 space = color_space(doc, dict, resources).filter(|cs| cs.components() == s.comps);
                 if space.is_none() {
@@ -165,6 +176,39 @@ pub(crate) fn decode(
             })
             .collect()
     });
+
+    // Fast path for the usual photos and scans: 8-bit gray (through the
+    // lookup table) or RGB with the default decoding, without a color key.
+    let direct_rgb = comps == 3 && matches!(space, ColorSpace::Rgb) && ranges.iter().all(|&r| r == (0.0, 1.0));
+    if color_key.is_none() && samples.bpc == 8 && (lut.is_some() || direct_rgb) {
+        let row_bytes = samples.row_bytes();
+        let mut data = samples.data;
+        if data.len() < row_bytes * samples.height {
+            data.resize(row_bytes * samples.height, 0); // short data reads as 0, like `Samples::get`
+        }
+        for (oy, ys) in src_y.iter().enumerate() {
+            for (ox, xs) in src_x.iter().enumerate() {
+                let (mut sum, mut n) = ([0u32; 3], 0u32);
+                for sy in ys.clone() {
+                    let row = &data[sy * row_bytes..(sy + 1) * row_bytes];
+                    for sx in xs.clone() {
+                        let rgb = match &lut {
+                            Some(lut) => lut[row[sx] as usize],
+                            None => [row[3 * sx], row[3 * sx + 1], row[3 * sx + 2]],
+                        };
+                        sum[0] += rgb[0] as u32;
+                        sum[1] += rgb[1] as u32;
+                        sum[2] += rgb[2] as u32;
+                        n += 1;
+                    }
+                }
+                let rgb = sum.map(|v| (v / n) as u8);
+                let a = alpha.as_ref().map_or(255, |m| m[oy * ow + ox]);
+                pixels[oy * ow + ox] = ColorU8::from_rgba(rgb[0], rgb[1], rgb[2], a).premultiply();
+            }
+        }
+        return Some(pixmap);
+    }
 
     let mut comp_buf = vec![0.0f64; comps];
     let mut raw_buf = vec![0u32; comps];
@@ -271,7 +315,7 @@ fn resample_red(pm: &Pixmap, w: usize, h: usize) -> Vec<u8> {
 }
 
 fn decode_jpeg(data: &[u8], target: (f64, f64)) -> Option<Samples> {
-    let mut decoder = jpeg_decoder::Decoder::new(data);
+    let mut decoder = crate::jpeg::Decoder::new(data);
     decoder.read_info().ok()?;
     let info = decoder.info()?;
     // Let the decoder downscale (by up to 8×) when the image is shown small.
@@ -280,13 +324,13 @@ fn decode_jpeg(data: &[u8], target: (f64, f64)) -> Option<Samples> {
     let (width, height) = decoder.scale(req_w, req_h).unwrap_or((info.width, info.height));
     let mut pixels = decoder.decode().ok()?;
     let comps = match info.pixel_format {
-        jpeg_decoder::PixelFormat::L8 => 1,
-        jpeg_decoder::PixelFormat::L16 => {
+        crate::jpeg::PixelFormat::L8 => 1,
+        crate::jpeg::PixelFormat::L16 => {
             pixels = pixels.chunks_exact(2).map(|c| c[0]).collect();
             1
         }
-        jpeg_decoder::PixelFormat::RGB24 => 3,
-        jpeg_decoder::PixelFormat::CMYK32 => {
+        crate::jpeg::PixelFormat::RGB24 => 3,
+        crate::jpeg::PixelFormat::CMYK32 => {
             // Adobe applications write CMYK JPEGs inverted.
             if has_adobe_marker(data) {
                 pixels.iter_mut().for_each(|v| *v = 255 - *v);

@@ -452,7 +452,7 @@ fn check_box_appearance(w: f64, h: f64, rotation: i64, style: char, checked: boo
         d.set(b"Matrix".to_vec(), Object::Array(m.map(real).to_vec()));
     }
     d.set(b"Resources".to_vec(), Object::Dictionary(resources));
-    Stream { dict: d, raw: ops.into_bytes() }
+    Stream { dict: d, raw: ops.into_bytes().into() }
 }
 
 fn find_field(doc: &Document, id: ObjRef) -> Result<FormField> {

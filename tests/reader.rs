@@ -964,7 +964,7 @@ fn brotli_compression_is_marked_and_readable() {
     use k_pdf::compress::{compress, CompressOptions};
     let doc = Document::from_bytes(compressible_doc()).unwrap();
     let mut out = Vec::new();
-    let report = compress(&doc, &CompressOptions { jpeg: true, brotli: true }, &mut out).unwrap();
+    let report = compress(&doc, &CompressOptions { jpeg: true, brotli: true, ..CompressOptions::best() }, &mut out).unwrap();
     assert!(report.brotli_streams > 0);
     assert!(out.starts_with(b"%PDF-2.0"));
     let small = Document::from_bytes(out).unwrap();

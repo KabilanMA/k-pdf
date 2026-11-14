@@ -8,7 +8,7 @@
 //! layout stays correct.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::hash::HashMap;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -74,8 +74,8 @@ impl RenderFont {
             program: Program::None,
             substitute: false,
             cid_to_gid: None,
-            glyphs: RefCell::new(HashMap::new()),
-            advances: RefCell::new(HashMap::new()),
+            glyphs: RefCell::new(HashMap::default()),
+            advances: RefCell::new(HashMap::default()),
         };
 
         if font.info.subtype == b"Type3" {

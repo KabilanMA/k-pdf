@@ -99,7 +99,7 @@ impl Compress {
                     ui.horizontal(|ui| {
                         let label = if self.brotli { "Compress with Brotli and save as…" } else { "Compress and save as…" };
                         if crate::theme::primary_button(ui, label).clicked() {
-                            action = Some(Action::Start(CompressOptions { jpeg: self.jpeg, brotli: self.brotli }));
+                            action = Some(Action::Start(CompressOptions { jpeg: self.jpeg, brotli: self.brotli, ..CompressOptions::best() }));
                         }
                         if ui.button("Cancel").clicked() {
                             close = true;
