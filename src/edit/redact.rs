@@ -444,9 +444,25 @@ impl Redactor<'_> {
             })
             .collect();
         let gray = colors.iter().all(|c| c[0] == c[1] && c[1] == c[2]);
-        let data: Vec<u8> = if gray { colors.iter().map(|c| c[0]).collect() } else { colors.concat() };
+        // Black-and-white scans (JBIG2, CCITT fax) stay one bit per pixel:
+        // eight times less data than gray.
+        let bilevel = gray && colors.iter().all(|c| c[0] == 0 || c[0] == 255);
+        let data: Vec<u8> = if bilevel {
+            let row = w.div_ceil(8);
+            let mut data = vec![0u8; row * h];
+            for (i, c) in colors.iter().enumerate() {
+                if c[0] == 255 {
+                    data[(i / w) * row + (i % w) / 8] |= 0x80 >> (i % w % 8);
+                }
+            }
+            data
+        } else if gray {
+            colors.iter().map(|c| c[0]).collect()
+        } else {
+            colors.concat()
+        };
         out.set(b"ColorSpace".to_vec(), Object::Name(if gray { b"DeviceGray".to_vec() } else { b"DeviceRGB".to_vec() }));
-        out.set(b"BitsPerComponent".to_vec(), Object::Integer(8));
+        out.set(b"BitsPerComponent".to_vec(), Object::Integer(if bilevel { 1 } else { 8 }));
         if pixels.iter().any(|p| p.alpha() < 255) {
             let mut mask = Dictionary::new();
             mask.set(b"Type".to_vec(), Object::Name(b"XObject".to_vec()));

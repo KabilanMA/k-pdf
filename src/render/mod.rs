@@ -3,10 +3,10 @@
 //!
 //! Supported: paths, fills/strokes, clipping, device/ICC/indexed/
 //! separation/DeviceN/Lab colors, axial/radial shadings, tiling and shading
-//! patterns, images (raw, JPEG, masks, soft masks), embedded TrueType/
-//! OpenType/CFF/Type 1/Type 3 fonts with system-font fallback, form
-//! XObjects, annotation appearances, optional content (hidden layers) and
-//! blend modes. Not yet: soft-mask groups, JPEG 2000/JBIG2/CCITT images.
+//! patterns, images (raw, JPEG, JPEG 2000, JBIG2, CCITT fax, masks, soft
+//! masks), embedded TrueType/OpenType/CFF/Type 1/Type 3 fonts with
+//! system-font fallback, form XObjects, annotation appearances, optional
+//! content (hidden layers) and blend modes. Not yet: soft-mask groups.
 
 mod color;
 pub mod dark;
@@ -758,7 +758,7 @@ impl<'d> Renderer<'d> {
                 canvas.draw_pixmap(0, 0, img.as_ref(), &paint, to_ts(&t), gs.mask.as_deref());
             }
             None => {
-                // Unsupported encoding (JPX/JBIG2/CCITT): show a light box.
+                // An image that can't be decoded (damaged, or too large): show a light box.
                 if let Some(r) = Rect::from_xywh(0.0, 0.0, 1.0, 1.0) {
                     let paint = solid_paint(Color::from_rgba8(220, 220, 220, 255), BlendMode::SourceOver);
                     canvas.fill_rect(r, &paint, ts, gs.mask.as_deref());
