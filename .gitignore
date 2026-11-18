@@ -21,8 +21,6 @@
 Thumbs.db
 desktop.ini
 
-# Local tool settings (Claude Code)
-.claude/settings.local.json
 
 # Files left by test runs and manual checks: PDFs, renders, screenshots,
 # and the viewer's temporary save files (".name.pdf.<pid>.tmp").
