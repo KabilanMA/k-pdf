@@ -517,6 +517,9 @@ struct Viewer {
     redo: Vec<Undo>,
     /// The "save changes?" question is showing; what to do afterwards.
     prompt: Option<After>,
+    /// "Replace the original file?" is showing (before saving over the
+    /// open file); what to do once saved.
+    confirm_overwrite: Option<After>,
     /// A save running in the background.
     saving: Option<Saving>,
     /// Changes were saved or discarded, so the window may close.
@@ -621,6 +624,7 @@ impl Viewer {
             undo: Vec::new(),
             redo: Vec::new(),
             prompt: None,
+            confirm_overwrite: None,
             saving: None,
             allow_close: false,
             start_page: args.page.map(|p| p.saturating_sub(1)),
@@ -1809,7 +1813,8 @@ impl Viewer {
         self.dialog.save(&self.ctx, Asked::SaveAs(after), dialog);
     }
 
-    /// Saves over the open file (Ctrl+S).
+    /// Saves the changes (Ctrl+S, the Save button). The original file is
+    /// never written over without asking first.
     fn save_in_place(&mut self, after: After) {
         if self.doc.is_none() && self.images.is_some() {
             self.save_images(false, after);
@@ -1817,8 +1822,61 @@ impl Viewer {
         }
         if self.is_untitled() {
             self.save_as_dialog(after);
-        } else if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
+        } else if self.doc.is_some() && self.saving.is_none() {
+            self.confirm_overwrite = Some(after);
+        }
+    }
+
+    /// Writes the changes over the open file, once the user agreed to.
+    fn overwrite(&mut self, after: After) {
+        if let Some(path) = self.doc.as_ref().map(|d| d.path.clone()) {
             self.save(path, after);
+        }
+    }
+
+    /// The "replace the original file?" dialog, before saving over it.
+    fn overwrite_prompt(&mut self, ctx: &egui::Context) {
+        if self.confirm_overwrite.is_none() {
+            return;
+        }
+        #[derive(PartialEq)]
+        enum Choice {
+            Replace,
+            Copy,
+            Cancel,
+        }
+        let question = format!(
+            "Saving replaces \"{}\" with the edited version. This can't be undone. Save a copy instead to keep the original as it is.",
+            self.doc_name()
+        );
+        let mut choice = None;
+        let response = egui::Modal::new(egui::Id::new("replace-original")).show(ctx, |ui| {
+            ui.set_max_width(400.0);
+            ui.heading("Replace the original file?");
+            ui.add_space(6.0);
+            ui.label(question);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if theme::primary_button(ui, "Replace").clicked() {
+                    choice = Some(Choice::Replace);
+                }
+                if ui.button("Save a copy…").clicked() {
+                    choice = Some(Choice::Copy);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        if response.should_close() && choice.is_none() {
+            choice = Some(Choice::Cancel); // Esc or a click outside
+        }
+        let Some(choice) = choice else { return };
+        let after = self.confirm_overwrite.take().unwrap_or(After::Nothing);
+        match choice {
+            Choice::Replace => self.overwrite(after),
+            Choice::Copy => self.save_as_dialog(after),
+            Choice::Cancel => {}
         }
     }
 
@@ -2101,11 +2159,17 @@ impl Viewer {
                 format!("\"{}\" has unsaved changes. Save them before {when}?", images.title())
             }
             Some(_) => format!("These pages haven't been saved as a PDF. Save them before {when}?"),
-            None => format!("\"{name}\" has unsaved changes. Save them before {when}?"),
+            None if self.is_untitled() => format!("\"{name}\" has unsaved changes. Save them before {when}?"),
+            None => format!(
+                "\"{name}\" has unsaved changes. Save them before {when}? Saving replaces the original file; Save a copy keeps it as it is."
+            ),
         };
+        // Saving over a file the user opened is a choice of its own.
+        let replaces = self.doc.is_some() && !self.is_untitled();
         #[derive(PartialEq)]
         enum Choice {
             Save,
+            Copy,
             Discard,
             Cancel,
         }
@@ -2117,8 +2181,11 @@ impl Viewer {
             ui.label(question);
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if theme::primary_button(ui, "Save").clicked() {
+                if theme::primary_button(ui, if replaces { "Replace original" } else { "Save" }).clicked() {
                     choice = Some(Choice::Save);
+                }
+                if replaces && ui.button("Save a copy…").clicked() {
+                    choice = Some(Choice::Copy);
                 }
                 if ui.button("Don't save").clicked() {
                     choice = Some(Choice::Discard);
@@ -2134,7 +2201,10 @@ impl Viewer {
         let Some(choice) = choice else { return };
         let after = self.prompt.take().unwrap_or(After::Nothing);
         match choice {
+            // Already chosen in this dialog, so not asked again.
+            Choice::Save if replaces => self.overwrite(after),
             Choice::Save => self.save_in_place(after),
+            Choice::Copy => self.save_as_dialog(after),
             Choice::Discard => {
                 self.undo.clear();
                 self.redo.clear();
@@ -4026,6 +4096,7 @@ impl eframe::App for Viewer {
         if ctx.input(|i| i.viewport().close_requested()) && self.is_modified() && !self.allow_close {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             if self.prompt.is_none() {
+                self.confirm_overwrite = None; // the close question replaces it
                 self.prompt = Some(After::Close);
             }
         }
@@ -4216,6 +4287,7 @@ impl eframe::App for Viewer {
             self.add_images_dialog(at);
         }
         self.unsaved_prompt(&ctx);
+        self.overwrite_prompt(&ctx);
         self.take_screenshot(&ctx);
     }
 }

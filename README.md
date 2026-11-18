@@ -166,7 +166,7 @@ Open a PDF from the start screen, with **Ctrl+O** (**Cmd+O** on a Mac), or by dr
 | Shortcut | Action |
 |---|---|
 | Ctrl+O | Open a file |
-| Ctrl+S | Save |
+| Ctrl+S | Save (asks before replacing the original) |
 | Ctrl+Shift+S | Save as |
 | Ctrl+F | Find words (also in scans and pictures) |
 | Enter / Shift+Enter, F3 / Shift+F3 | Next / previous match |
