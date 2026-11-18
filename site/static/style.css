@@ -240,6 +240,13 @@ th { font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; colo
 .post-body ul { padding-left: 1.3em; }
 .post-actions { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin: 16px 0 0; }
 
+/* Star on GitHub */
+.star-band { border-top: 1px solid var(--line); padding: 36px 0; background: radial-gradient(900px 260px at 50% 120%, var(--brand-soft), transparent 70%); }
+.star-row { display: flex; align-items: center; justify-content: space-between; gap: 20px 32px; flex-wrap: wrap; }
+.star-row h2 { margin: 0 0 4px; font-size: 1.35rem; }
+.star-row p { margin: 0; color: var(--muted); max-width: 560px; }
+.star-icon { color: #ffc94a; flex: none; }
+
 /* Footer */
 .site-footer { border-top: 1px solid var(--line); background: var(--bg-soft); padding: 36px 0; font-size: 0.93rem; }
 .footer-row { display: flex; justify-content: space-between; gap: 32px; flex-wrap: wrap; }

@@ -6,9 +6,17 @@
 <title>{{title}}</title>
 <meta name="description" content="{{description}}">
 <meta name="color-scheme" content="light dark">
+<link rel="canonical" href="{{canonical}}">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="k-pdf">
+<meta property="og:url" content="{{canonical}}">
 <meta property="og:title" content="{{title}}">
 <meta property="og:description" content="{{description}}">
 <meta property="og:image" content="{{site_url}}images/read-light.webp">
+<meta property="og:image:width" content="1000">
+<meta property="og:image:height" content="800">
+<meta name="twitter:card" content="summary_large_image">
+{{structured_data}}
 <link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="alternate" type="application/atom+xml" title="k-pdf news" href="feed.xml">
 <link rel="stylesheet" href="style.css">
@@ -31,11 +39,20 @@
 <main id="main">
 {{content}}
 </main>
+<aside class="star-band" aria-label="Star k-pdf on GitHub">
+  <div class="wrap star-row">
+    <div>
+      <h2>Find k-pdf useful?</h2>
+      <p>Give it a star on GitHub. It's free, takes a second, and helps other people find the project.</p>
+    </div>
+    <a class="button" href="{{repo_url}}"><svg class="star-icon" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 2.5l2.94 5.96 6.56.95-4.75 4.63 1.12 6.54L12 17.5l-5.87 3.08 1.12-6.54L2.5 9.41l6.56-.95z"/></svg>Star on GitHub</a>
+  </div>
+</aside>
 <footer class="site-footer">
   <div class="wrap footer-row">
     <div>
       <a class="brand small" href="index.html"><img src="logo.svg" alt="" width="24" height="24"><span>k-pdf</span></a>
-      <p class="muted">A fast, lightweight PDF viewer and editor. Free and open source under the MIT or Apache 2.0 license. </p>
+      <p class="muted">A fast, lightweight PDF viewer and editor. Free and open source under the MIT or Apache 2.0 license.</p>
     </div>
     <nav aria-label="Footer">
       <a href="guide.html">Guide</a>

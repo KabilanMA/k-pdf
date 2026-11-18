@@ -245,6 +245,65 @@ def news_post_html(post):
 </article>"""
 
 
+def structured_data(page, description, site_url, repo_url, version, latest):
+    """JSON-LD that tells search engines what the site is about.
+
+    The home page describes k-pdf as a free application (schema.org
+    SoftwareApplication), which Google can show with its systems and price.
+    Other pages say which site they belong to.
+    """
+    if page == "index.html":
+        data = {
+            "@context": "https://schema.org",
+            "@type": "SoftwareApplication",
+            "name": "k-pdf",
+            "description": description,
+            "url": site_url,
+            "applicationCategory": "BusinessApplication",
+            "applicationSubCategory": "PDF viewer and editor",
+            "operatingSystem": "Windows, macOS, Linux",
+            "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+            "license": "https://opensource.org/licenses/MIT",
+            "image": f"{site_url}images/read-light.webp",
+            "screenshot": f"{site_url}images/sections-light.webp",
+            "downloadUrl": f"{repo_url}/releases/latest",
+            "codeRepository": repo_url,
+            "isAccessibleForFree": True,
+        }
+        if version:
+            data["softwareVersion"] = version
+            data["datePublished"] = latest["published_at"][:10]
+        graph = [data, {"@context": "https://schema.org", "@type": "WebSite", "name": "k-pdf", "url": site_url}]
+    else:
+        graph = [{"@context": "https://schema.org", "@type": "WebPage", "url": site_url + page,
+                  "isPartOf": {"@type": "WebSite", "name": "k-pdf", "url": site_url}}]
+    # "</" can't appear inside a script element.
+    text = json.dumps(graph if len(graph) > 1 else graph[0], ensure_ascii=False).replace("</", "<\\/")
+    return f'<script type="application/ld+json">{text}</script>'
+
+
+def page_date(path, posts):
+    """When a page last changed: its last commit, or the newest post it shows."""
+    dates = [p["date"] for p in posts[:1]]
+    try:
+        out = subprocess.run(["git", "log", "-1", "--format=%cs", "--", path], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+        if out:
+            dates.append(dt.date.fromisoformat(out))
+    except (OSError, ValueError):
+        pass
+    return max(dates) if dates else dt.date.today()
+
+
+def sitemap_xml(pages):
+    """The list of pages for search engines (sitemaps.org)."""
+    urls = "\n".join(f"  <url><loc>{esc(url)}</loc><lastmod>{date.isoformat()}</lastmod></url>" for url, date in pages)
+    return f"""<?xml version="1.0" encoding="utf-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+{urls}
+</urlset>
+"""
+
+
 def atom_feed(posts, site_url):
     updated = posts[0]["date"].isoformat() if posts else dt.date.today().isoformat()
     entries = []
@@ -369,6 +428,7 @@ def main():
         return re.sub(r"\{\{\s*([a-z_]+)\s*\}\}", sub, text)
 
     pages_dir = os.path.join(HERE, "pages")
+    sitemap = []
     for page in sorted(os.listdir(pages_dir)):
         if not page.endswith(".html"):
             continue
@@ -380,8 +440,15 @@ def main():
             sys.exit(f"{page}: the first line must be <!-- title | description -->")
         title, description = m.groups()
         nav = page[:-5]
-        out = layout.replace("{{content}}", body).replace("{{title}}", esc(title)).replace("{{description}}", esc(description)).replace("{{page}}", nav)
+        # Search engines treat index.html and the folder as one page, so the
+        # home page's canonical address is the folder.
+        canonical = site_url if page == "index.html" else site_url + page
+        data = structured_data(page, description, site_url, repo_url, version, latest)
+        out = (layout.replace("{{content}}", body).replace("{{title}}", esc(title))
+               .replace("{{description}}", esc(description)).replace("{{page}}", nav)
+               .replace("{{canonical}}", esc(canonical)).replace("{{structured_data}}", data))
         open(os.path.join(args.out, page), "w", encoding="utf-8").write(fill(out))
+        sitemap.append((canonical, page_date(os.path.join(pages_dir, page), posts if page in ("index.html", "news.html") else [])))
 
     shutil.copytree(os.path.join(HERE, "static"), args.out, dirs_exist_ok=True)
     shutil.copy(os.path.join(ROOT, "packaging", "linux", "k-pdf.svg"), os.path.join(args.out, "logo.svg"))
@@ -392,6 +459,7 @@ def main():
             if f.endswith(".svg"):
                 shutil.copy(os.path.join(bench, f), os.path.join(args.out, "bench", f))
     open(os.path.join(args.out, "feed.xml"), "w", encoding="utf-8").write(atom_feed(posts, site_url))
+    open(os.path.join(args.out, "sitemap.xml"), "w", encoding="utf-8").write(sitemap_xml(sitemap))
     # Pages serves files as they are, without Jekyll.
     open(os.path.join(args.out, ".nojekyll"), "w").close()
     print(f"Built {args.out}: version {version or 'none'}, {len(posts)} news posts")
