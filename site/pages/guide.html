@@ -1,0 +1,374 @@
+<!-- Guide · k-pdf | How to install k-pdf and use every feature, step by step with screenshots: reading, search, editing, comments, forms, signatures, scanning, redaction, printing and more. -->
+<div class="wrap guide-layout">
+  <nav class="toc" aria-label="Guide contents">
+    <button class="toc-toggle" aria-expanded="false">Contents</button>
+    <div class="toc-list">
+      <h2>Getting started</h2>
+      <a href="#install">Install</a>
+      <a href="#open">Open a file</a>
+      <a href="#toolbar">The toolbar</a>
+      <h2>Reading</h2>
+      <a href="#reading">Read and move around</a>
+      <a href="#search">Find words</a>
+      <a href="#dark-pages">Dark pages</a>
+      <a href="#password">Password-protected files</a>
+      <h2>Editing</h2>
+      <a href="#edit-text">Edit text</a>
+      <a href="#highlight">Highlight and comment</a>
+      <a href="#fill-forms">Fill in forms</a>
+      <a href="#create-forms">Create forms</a>
+      <a href="#sign">Sign</a>
+      <a href="#redact">Redact</a>
+      <h2>Pages</h2>
+      <a href="#pages">Reorder, insert, delete</a>
+      <a href="#rotate">Rotate</a>
+      <a href="#crop">Crop</a>
+      <h2>Scans and photos</h2>
+      <a href="#images">Images to PDF</a>
+      <a href="#clean-up">Clean up scanned pages</a>
+      <h2>Sharing</h2>
+      <a href="#present">Present</a>
+      <a href="#print">Print</a>
+      <a href="#compress">Compress</a>
+      <a href="#save">Save and undo</a>
+      <h2>Reference</h2>
+      <a href="#shortcuts">Keyboard shortcuts</a>
+      <a href="#cli">Command line</a>
+      <a href="#source">Build from source</a>
+    </div>
+  </nav>
+
+  <article class="guide">
+    <h1>The k-pdf guide</h1>
+    <p class="intro">How to install k-pdf and use each of its features, step by step. On a Mac, press <kbd>Cmd</kbd> wherever this guide says <kbd>Ctrl</kbd>. Click any screenshot to see it full size.</p>
+
+    <section id="install">
+      <h2>Install</h2>
+      <p>Download k-pdf {{version}} for your system from the <a href="index.html#download">download section</a> or the <a href="{{release_url}}">release page</a>, then follow the steps for your system.</p>
+      <div class="os-tabs" role="tablist" aria-label="System">
+        <button role="tab" id="tab-windows" data-os="windows" aria-controls="panel-windows">Windows</button>
+        <button role="tab" id="tab-macos" data-os="macos" aria-controls="panel-macos">macOS</button>
+        <button role="tab" id="tab-linux" data-os="linux" aria-controls="panel-linux">Linux</button>
+      </div>
+      <div class="os-panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows">
+        <ol>
+          <li>Download <code>k-pdf-…-windows-x86_64.zip</code>.</li>
+          <li>Right-click it and choose <strong>Extract All…</strong>, then pick a folder to keep k-pdf in.</li>
+          <li>Open that folder and double-click <code>k-pdf.exe</code>.</li>
+          <li>If Windows SmartScreen says it protected your PC, click <strong>More info</strong>, then <strong>Run anyway</strong>. This only happens the first time.</li>
+        </ol>
+        <p class="tip"><strong>Tip:</strong> to open PDFs with k-pdf by double-clicking them, right-click a PDF, choose <strong>Open with → Choose another app</strong>, select <code>k-pdf.exe</code> and tick <strong>Always</strong>.</p>
+      </div>
+      <div class="os-panel" role="tabpanel" id="panel-macos" aria-labelledby="tab-macos" hidden>
+        <ol>
+          <li>Download <code>k-pdf-…-macos-universal.dmg</code>. It works on Apple Silicon and Intel Macs with macOS 11 or later.</li>
+          <li>Open it and drag <strong>k-pdf</strong> into <strong>Applications</strong>.</li>
+          <li>Open k-pdf from Applications. The first time, macOS says it can't check the app: click <strong>Done</strong>, open <strong>System Settings → Privacy &amp; Security</strong>, scroll down and click <strong>Open Anyway</strong>.</li>
+        </ol>
+        <p class="tip"><strong>Tip:</strong> in the Terminal, <code>xattr -dr com.apple.quarantine /Applications/k-pdf.app</code> does the same as step 3. The command-line tool is inside the app at <code>/Applications/k-pdf.app/Contents/MacOS/k-pdf-cli</code>. Open files with k-pdf's Open button or by dropping them on its window.</p>
+      </div>
+      <div class="os-panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
+        <ol>
+          <li>Download <code>k-pdf-…-linux-x86_64.tar.gz</code>. It runs on Linux distributions from 2022 on.</li>
+          <li>Unpack it and install:
+<pre><code>tar xf k-pdf-*-linux-x86_64.tar.gz
+cd k-pdf-*-linux-x86_64
+./install.sh             # k-pdf appears in your applications menu
+./install.sh --default   # …and also opens PDF files by default</code></pre></li>
+          <li>Start k-pdf from your applications menu.</li>
+        </ol>
+        <p class="tip"><strong>Tip:</strong> <code>sudo PREFIX=/usr/local ./install.sh</code> installs it for all users, and <code>./install.sh --uninstall</code> removes it.</p>
+      </div>
+      <p>The downloads include the text-recognition models used to find words in scans and photos, so there is nothing else to install.</p>
+    </section>
+
+    <section id="open">
+      <h2>Open a file</h2>
+      <p>When k-pdf starts without a file, it asks what you'd like to do:</p>
+      <ul>
+        <li><strong>Open a PDF or images</strong>: <strong>Choose a file…</strong> opens a PDF, or JPEG, PNG, GIF, BMP, TIFF and WebP images to make into a PDF.</li>
+        <li><strong>Create a form</strong>: start from a <strong>Blank page</strong>, or <strong>From a PDF…</strong> you have, such as a scanned paper form.</li>
+      </ul>
+      <p>You can also drop files anywhere on the window, press <kbd>Ctrl</kbd>+<kbd>O</kbd>, or use the folder button at the top left.</p>
+      {{shot:start|The start screen offers to open a file or to create a form.}}
+    </section>
+
+    <section id="toolbar">
+      <h2>The toolbar</h2>
+      <p>From left to right, the toolbar at the top has:</p>
+      <ul>
+        <li><strong>Open</strong> and <strong>Save</strong>, then <strong>Undo</strong> and <strong>Redo</strong>.</li>
+        <li>The editing tools: <strong>Edit text</strong>, <strong>Crop</strong>, <strong>Rotate</strong>, <strong>Redact</strong>, <strong>Form</strong>, <strong>Comment</strong> and <strong>Sign</strong>.</li>
+        <li>Viewing aids that don't change the document: <strong>Search</strong>, <strong>Sidebar</strong> and <strong>Dark pages</strong>.</li>
+        <li><strong>Clean up scanned pages</strong> (the sparkle) and <strong>Present</strong>.</li>
+        <li>The file name, with a dot when there are unsaved changes, and the <strong>⋯</strong> menu with <strong>Save as</strong>, <strong>Delete pages</strong>, <strong>Insert pages or images</strong>, <strong>Print</strong>, <strong>Compress</strong>, <strong>Document info</strong> and the theme.</li>
+      </ul>
+      <p>Hover over a button to see its name. Page navigation and zoom float at the bottom of the window, with buttons to fit the page's width or the whole page.</p>
+      {{shot:read|A document open in k-pdf, with page thumbnails on the left and the zoom bar at the bottom.}}
+    </section>
+
+    <section id="reading">
+      <h2>Read and move around</h2>
+      <ul>
+        <li>Scroll with the mouse wheel or touchpad. The arrows and page number in the bottom bar move between pages; type a number to jump to that page.</li>
+        <li>Zoom with <kbd>Ctrl</kbd> and the mouse wheel, <kbd>Ctrl</kbd>+<kbd>+</kbd>/<kbd>-</kbd> or the bottom bar. <kbd>Ctrl</kbd>+<kbd>0</kbd> fits the page width and <kbd>Ctrl</kbd>+<kbd>9</kbd> the whole page.</li>
+        <li>Select text by dragging over it and copy it with <kbd>Ctrl</kbd>+<kbd>C</kbd>.</li>
+        <li>Double-click a link to go to that part of the document; <kbd>Ctrl</kbd>+click a web link to open it in your browser.</li>
+        <li>k-pdf remembers where you stopped. Next time, the file opens at the same page and spot, even after closing the app.</li>
+      </ul>
+      <h3>The sidebar</h3>
+      <p>The sidebar button in the toolbar shows or hides the sidebar. The three buttons at its top (or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd>) switch between <strong>page thumbnails</strong>, <strong>sections</strong> (the document's headings) and <strong>comments</strong>. Click a section to jump to it; the one you're reading is highlighted. Long documents open on the sections, short ones on the thumbnails.</p>
+      {{shot:sections|The sections list shows the document's headings, with the page each one starts on.}}
+    </section>
+
+    <section id="search">
+      <h2>Find words</h2>
+      <ol>
+        <li>Press <kbd>Ctrl</kbd>+<kbd>F</kbd> or click the magnifying glass.</li>
+        <li>Type what you're looking for. Every match in the document is highlighted, and the box shows how many there are.</li>
+        <li>Press <kbd>Enter</kbd> (or <kbd>F3</kbd>) for the next match and <kbd>Shift</kbd>+<kbd>Enter</kbd> for the previous one.</li>
+      </ol>
+      <p><strong>Aa</strong> matches upper and lower case exactly, and <strong>ab|</strong> finds whole words only. With <strong>Images</strong> on, k-pdf also reads the text in scanned pages, photos and pictures (even if they're crooked, sideways or upside down) and finds words there. After that you can select and copy text on scanned pages too.</p>
+      {{shot:search|Searching for "stream" highlights all 20 matches; the current one is orange.}}
+    </section>
+
+    <section id="dark-pages">
+      <h2>Dark pages for reading</h2>
+      <p>Click the moon button (or press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd>) to turn the pages dark: light text on a soft dark gray. Colors stay recognizable (a light-blue box becomes a dark-blue one) and photos keep their real colors. Click it again to go back.</p>
+      <p>The app's own light or dark look follows your system; you can choose <strong>Light</strong> or <strong>Dark</strong> in the <strong>⋯</strong> menu under <strong>Appearance</strong>.</p>
+      {{shot:dark-pages|Dark pages: the document is shown as light text on dark gray.}}
+    </section>
+
+    <section id="password">
+      <h2>Password-protected files</h2>
+      <p>When you open a protected PDF, k-pdf asks for its password. The eye button shows what you typed. Everything then works as usual (reading, searching, editing, signing and printing), and saving keeps the same password, so the file stays protected. Files that are only protected against changes open without asking.</p>
+      {{shot:password|k-pdf asks for the password of a protected file.}}
+    </section>
+
+    <section id="edit-text">
+      <h2>Edit text</h2>
+      <ol>
+        <li>Click the pencil button (or press <kbd>Ctrl</kbd>+<kbd>E</kbd>) to start editing.</li>
+        <li>Click any paragraph and type. To add new text, click an empty spot on the page.</li>
+        <li>Use the bar above the text to change the font, size, bold, italic, underline, color, alignment and line spacing, like in a word processor.</li>
+        <li>Click outside the text to apply the change, or press <kbd>Esc</kbd> to cancel it.</li>
+      </ol>
+      {{shot:edit|Editing a paragraph: the text keeps its font, and the bar above it changes the formatting.}}
+    </section>
+
+    <section id="highlight">
+      <h2>Highlight and comment</h2>
+      <ol>
+        <li>Select some text by dragging over it. A small bar appears above it.</li>
+        <li>Click one of the four colors to highlight the text, or <strong>Comment</strong> to highlight it and write a note.</li>
+        <li>Type your comment and click <strong>Done</strong>. Click a highlight later to change or <strong>Delete</strong> it.</li>
+      </ol>
+      <p>To drop a note anywhere on a page, click the speech-bubble button and then click the page. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> highlights the selected text with the last color you used. The third sidebar tab lists all the comments in the document. They are saved as standard PDF comments, so other PDF readers show them too.</p>
+      <div class="shots-2">
+        {{shot:highlight|Select text, then pick a highlight color or Comment.}}
+        {{shot:comment|Writing a comment on a highlight.}}
+      </div>
+    </section>
+
+    <section id="fill-forms">
+      <h2>Fill in forms</h2>
+      <p>Fields you can fill in are shown in blue; a red border means a field must be filled in. Click a text field and type, click check boxes and radio buttons to tick them, and pick from drop-down lists. Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save the filled-in form.</p>
+      <p>To hide the blue, turn off <strong>Highlight fillable fields</strong> in the <strong>⋯</strong> menu.</p>
+      {{shot:form-fill|A membership form with the name, email and check boxes filled in.}}
+    </section>
+
+    <section id="create-forms">
+      <h2>Create forms</h2>
+      <ol>
+        <li>On the start screen, choose <strong>Blank page</strong> or <strong>From a PDF…</strong> (a paper form you scanned, for example). With a PDF already open, click the <strong>Form</strong> button in the toolbar.</li>
+        <li>Pick what to add: <strong>Text box</strong>, <strong>Paragraph</strong> (several lines), <strong>Check box</strong> or <strong>Drop-down</strong>.</li>
+        <li>Drag on the page where the field should go.</li>
+        <li>Click a field to move it, resize it by its corners, or change it: its <strong>Name</strong>, the <strong>Tip</strong> shown on hover, the text size, and whether it's <strong>Required</strong>. <strong>Delete</strong> removes it.</li>
+        <li>Click <strong>Done</strong> and save. Other PDF readers can fill in the form too.</li>
+      </ol>
+      {{shot:form-create|The form tool: every field is outlined, and the selected one can be renamed, resized or deleted.}}
+    </section>
+
+    <section id="sign">
+      <h2>Sign</h2>
+      <ol>
+        <li>Click the pen button in the toolbar (or <strong>Add a signature…</strong> in the <strong>⋯</strong> menu).</li>
+        <li>Make your signature in one of three ways:
+          <ul>
+            <li><strong>Draw</strong> it on the white sheet with the mouse, a touchpad or a pen. Choose the pen width; <strong>Undo stroke</strong> and <strong>Clear</strong> fix mistakes.</li>
+            <li><strong>Type</strong> your name and pick one of the handwriting fonts on your computer.</li>
+            <li>Take it from a <strong>Photo or scan</strong> (an image or a PDF): drag a box around the signature, and the paper around it becomes see-through, leaving clean ink.</li>
+          </ul>
+        </li>
+        <li>Choose black or blue ink and click <strong>Use signature</strong>.</li>
+        <li>Drag the signature to where it goes on the page and resize it by its corners, then click <strong>Place</strong>.</li>
+      </ol>
+      <p>Your signature is remembered while k-pdf is open, so you can sign several places quickly.</p>
+      {{shot:sign|Typing a name and choosing a handwriting style for the signature.}}
+    </section>
+
+    <section id="redact">
+      <h2>Redact</h2>
+      <p>Redacting removes text and images from the file for good. It doesn't just cover them.</p>
+      <ol>
+        <li>Click the <strong>Redact</strong> button in the toolbar.</li>
+        <li>Drag over what to hide: text, an image or any area. To hide a word or name everywhere, type it in the <strong>find</strong> box and click <strong>Mark all</strong>.</li>
+        <li>Check the red marks, then click <strong>Redact</strong>. <strong>Clear marks</strong> starts over.</li>
+        <li>Save the file. Until you save, <kbd>Ctrl</kbd>+<kbd>Z</kbd> brings the text back.</li>
+      </ol>
+      <p>You can also select text in the normal view and click <strong>Redact</strong> to mark it.</p>
+      {{shot:redact|Two lines of the abstract blacked out; the bar says 38 characters were removed.}}
+    </section>
+
+    <section id="pages">
+      <h2>Reorder, insert and delete pages</h2>
+      <ul>
+        <li><strong>Reorder:</strong> in the page thumbnails, drag a page to its new place.</li>
+        <li><strong>Insert:</strong> click the <strong>+</strong> that appears between two thumbnails, or choose <strong>Insert pages or images…</strong> in the <strong>⋯</strong> menu, and pick a PDF or images. Images open in the <a href="#images">image editor</a> first, so you can scan and crop them; <strong>Insert</strong> adds them as pages.</li>
+        <li><strong>Delete:</strong> hover over a thumbnail and click its bin button, or choose <strong>Delete pages…</strong> in the <strong>⋯</strong> menu and type a list like <code>2, 5-7</code>.</li>
+      </ul>
+      {{shot:pages|Hovering over a page thumbnail shows its delete button.}}
+    </section>
+
+    <section id="rotate">
+      <h2>Rotate</h2>
+      <ol>
+        <li>Click the <strong>Rotate</strong> button in the toolbar.</li>
+        <li>Choose which pages: the current page, <strong>All pages</strong>, or a list in <strong>Pages</strong> such as <code>1, 3-5</code>.</li>
+        <li>Click <strong>Left</strong>, <strong>Right</strong> or <strong>180°</strong>, then <strong>Done</strong>.</li>
+      </ol>
+      <p><kbd>Ctrl</kbd>+<kbd>R</kbd> and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> turn the current page right or left without opening the tool.</p>
+      {{shot:rotate|The first page turned to the right.}}
+    </section>
+
+    <section id="crop">
+      <h2>Crop</h2>
+      <ol>
+        <li>Click the <strong>Crop</strong> button in the toolbar.</li>
+        <li>Drag on the page to choose the area to keep. Drag its edges and corners to adjust it.</li>
+        <li>Click <strong>Crop this page</strong>, <strong>Crop all pages</strong>, or type a list of pages and click <strong>Crop these pages</strong>. <strong>Remove crop</strong> brings back the whole page.</li>
+      </ol>
+      {{shot:crop|Choosing the area of the page to keep.}}
+    </section>
+
+    <section id="images">
+      <h2>Turn images and phone photos into a PDF</h2>
+      <ol>
+        <li>Open one or more images (JPEG, PNG, GIF, BMP, TIFF or WebP) like a PDF: with <strong>Choose a file…</strong>, the Open button, or by dropping them on the window. Each image becomes a page.</li>
+        <li>Use the thumbnails to add more images or PDFs (<strong>+</strong>), drag them into order, rotate them or remove them.</li>
+        <li>For each page, choose how it looks:
+          <ul>
+            <li><strong>As is</strong> keeps the image unchanged.</li>
+            <li><strong>Cropped</strong> only cuts out the page.</li>
+            <li><strong>Color scan</strong>, <strong>Gray scan</strong> and <strong>Black &amp; white</strong> turn a phone photo of a document into a clean scanned page: k-pdf finds the page, flattens it, straightens slanted text and removes shadows.</li>
+          </ul>
+        </li>
+        <li>If the page wasn't found exactly, click <strong>Corners</strong> and drag them into place.</li>
+        <li>Click <strong>Save PDF</strong> to put all the pages into one PDF, then <strong>Open PDF</strong> to read the result.</li>
+      </ol>
+      <p>PDFs you add join the other pages, kept exactly as they are (their text stays selectable) or cleaned up like a scan.</p>
+      <div class="shots-2">
+        {{shot:photo|Before: a phone photo of a page on a desk.}}
+        {{shot:scan|After: Color scan finds the page, flattens it and whitens the paper.}}
+      </div>
+    </section>
+
+    <section id="clean-up">
+      <h2>Clean up scanned and handwritten pages</h2>
+      <ol>
+        <li>With a scanned PDF open, click the sparkle button in the toolbar (or <strong>Clean up scanned pages…</strong> in the <strong>⋯</strong> menu). The pages are shown as they are.</li>
+        <li>Pick a look for the pages that need it. <strong>Apply to…</strong> gives several pages the same look, like <code>1, 3-5</code> or all of them.</li>
+        <li>For handwritten notes, turn on <strong>Handwriting</strong>: light pen and pencil strokes are darkened so every word is readable, the paper turns white, and a notebook's ruled lines stay light (and are left out in black and white).</li>
+        <li>Click <strong>Apply</strong>. The cleaned pages replace the old ones and you're back in the document; <kbd>Ctrl</kbd>+<kbd>Z</kbd> undoes it.</li>
+      </ol>
+      {{shot:cleanup|Faint pencil notes on lined paper, cleaned up in black and white with Handwriting on.}}
+    </section>
+
+    <section id="present">
+      <h2>Present</h2>
+      <p>Press <kbd>F5</kbd> to present from the start, or <kbd>Shift</kbd>+<kbd>F5</kbd> from the current page (also in the <strong>⋯</strong> menu). The pages are shown as full-screen slides with smooth fades between them.</p>
+      <ul>
+        <li><kbd>→</kbd> or a click goes to the next slide, <kbd>←</kbd> back.</li>
+        <li><kbd>B</kbd> blacks out the screen, <kbd>Esc</kbd> ends the presentation.</li>
+        <li><kbd>P</kbd> switches the presenter view: the next slide, your comments as speaker notes, and a timer. With two screens, the slides go on one and the presenter view on your main screen.</li>
+      </ul>
+      {{shot:present|Presenting: the page fills the screen.}}
+    </section>
+
+    <section id="print">
+      <h2>Print</h2>
+      <p>Press <kbd>Ctrl</kbd>+<kbd>P</kbd> or choose <strong>Print…</strong> in the <strong>⋯</strong> menu. Choose the printer and number of copies, which pages (all, the current one, a range like <code>1-3, 5</code>, odd or even, or in reverse order), two-sided printing, several pages per sheet, scaling, paper size, black and white, and whether comments are printed. The preview on the right shows each sheet. Unsaved changes are printed too.</p>
+      {{shot:print|The print window, with a preview of the first sheet.}}
+    </section>
+
+    <section id="compress">
+      <h2>Compress</h2>
+      <p>Choose <strong>Compress…</strong> in the <strong>⋯</strong> menu, then <strong>Compress and save as…</strong> to save a smaller copy that looks and works exactly the same. Nothing is lost, not even image quality. Unsaved changes are included.</p>
+      <p><strong>Optimize photos (JPEG)</strong> stores photos more efficiently, often 10–15% smaller, with identical pixels. Brotli compression makes files smaller still, but many PDF readers can't open them yet.</p>
+      {{shot:compress|Compress saves a smaller copy without losing quality.}}
+    </section>
+
+    <section id="save">
+      <h2>Save and undo</h2>
+      <p>Every change can be undone with <kbd>Ctrl</kbd>+<kbd>Z</kbd> and redone with <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd>. Nothing is written to the file until you save: <kbd>Ctrl</kbd>+<kbd>S</kbd> saves over the file, and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> saves a copy. A dot before the file name means there are unsaved changes.</p>
+    </section>
+
+    <section id="shortcuts">
+      <h2>Keyboard shortcuts</h2>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Shortcut</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Open a file</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Save</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></td><td>Save as</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Find words (also in scans and pictures)</td></tr>
+          <tr><td><kbd>Enter</kbd> / <kbd>Shift</kbd>+<kbd>Enter</kbd>, <kbd>F3</kbd> / <kbd>Shift</kbd>+<kbd>F3</kbd></td><td>Next / previous match</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Print</td></tr>
+          <tr><td><kbd>F5</kbd> / <kbd>Shift</kbd>+<kbd>F5</kbd></td><td>Present from the start / from this page</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Edit text on or off</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd></td><td>Dark pages on or off</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd></td><td>Sidebar: pages, sections or comments</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd></td><td>Highlight the selected text</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd></td><td>Rotate the current page right / left</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>C</kbd></td><td>Copy the selected text</td></tr>
+          <tr><td><kbd>Ctrl</kbd> + mouse wheel, <kbd>Ctrl</kbd>+<kbd>+</kbd> / <kbd>-</kbd></td><td>Zoom</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd> / <kbd>Ctrl</kbd>+<kbd>9</kbd></td><td>Fit the width / fit the whole page</td></tr>
+          <tr><td>Double-click a link</td><td>Go to that part of the document</td></tr>
+          <tr><td><kbd>Ctrl</kbd>+click a web link</td><td>Open it in your browser</td></tr>
+        </tbody>
+      </table></div>
+      <p>While presenting: <kbd>→</kbd> <kbd>←</kbd> move between slides, <kbd>B</kbd> blacks out the screen, <kbd>P</kbd> switches the presenter view and <kbd>Esc</kbd> ends.</p>
+    </section>
+
+    <section id="cli">
+      <h2>Command line</h2>
+      <p>k-pdf comes with <code>k-pdf-cli</code> for scripts and batch jobs: merge, reorder, crop, redact, compress, fill in forms, sign, make PDFs from images or scan photos, extract text and more. A few examples:</p>
+<pre><code>k-pdf-cli merge    combined.pdf a.pdf b.pdf
+k-pdf-cli redact   in.pdf out.pdf --text "Jane Doe"
+k-pdf-cli compress in.pdf smaller.pdf
+k-pdf-cli compress in.pdf smallest.pdf --best      # smaller, slower
+k-pdf-cli images   album.pdf photo1.jpg drawing.png
+k-pdf-cli scan     receipts.pdf photo1.jpg photo2.jpg --mode bw
+k-pdf-cli scan     clean-notes.pdf notes.pdf --handwriting
+k-pdf-cli search   scanned.pdf "invoice number"
+k-pdf-cli text     paper.pdf                         # all the text
+k-pdf-cli fill     form.pdf out.pdf "Name=Ada Lovelace" "Agree=on"
+k-pdf-cli sign     contract.pdf signed.pdf 2 72 640 150 --text "Jane Doe" --ink blue
+k-pdf-cli text     locked.pdf --password "the password"
+k-pdf-cli decrypt  locked.pdf unlocked.pdf --password "the password"</code></pre>
+      <p>Run <code>k-pdf-cli --help</code> for everything it can do. On Linux the installer puts it on your path; on Windows it is next to <code>k-pdf.exe</code>; on macOS it is inside the app.</p>
+    </section>
+
+    <section id="source">
+      <h2>Build from source</h2>
+      <p>With <a href="https://rustup.rs">Rust</a> and a C compiler installed:</p>
+<pre><code>git clone {{repo_url}}.git
+cd k-pdf
+cargo build --release --workspace
+./target/release/k-pdf
+packaging/fetch-ocr-models.sh    # once: the models for reading text in images (about 12 MB)</code></pre>
+      <p>On Linux, <code>packaging/linux/install.sh --link</code> adds your build to the applications menu. How k-pdf works inside is in the <a href="{{repo_url}}/blob/master/TECHNICAL.md">technical documentation</a>.</p>
+    </section>
+  </article>
+</div>

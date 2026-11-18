@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:image" content="{{site_url}}images/read-light.webp">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="alternate" type="application/atom+xml" title="k-pdf news" href="feed.xml">
+<link rel="stylesheet" href="style.css">
+<script defer src="site.js"></script>
+</head>
+<body data-page="{{page}}">
+<a class="skip" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="wrap header-row">
+    <a class="brand" href="index.html"><img src="logo.svg" alt="" width="32" height="32"><span>k-pdf</span></a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="index.html#features" data-nav="features">Features</a>
+      <a href="guide.html" data-nav="guide">Guide</a>
+      <a href="news.html" data-nav="news">News</a>
+      <a href="{{repo_url}}" class="nav-github">GitHub</a>
+      <a href="index.html#download" class="button small">Download</a>
+    </nav>
+  </div>
+</header>
+<main id="main">
+{{content}}
+</main>
+<footer class="site-footer">
+  <div class="wrap footer-row">
+    <div>
+      <a class="brand small" href="index.html"><img src="logo.svg" alt="" width="24" height="24"><span>k-pdf</span></a>
+      <p class="muted">A fast, lightweight PDF viewer and editor. Free and open source under the MIT or Apache 2.0 license. Built entirely using Claude.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="guide.html">Guide</a>
+      <a href="news.html">News</a>
+      <a href="feed.xml">News feed</a>
+      <a href="{{releases_url}}">All releases</a>
+      <a href="{{repo_url}}">Source code</a>
+      <a href="{{repo_url}}/issues">Report a problem</a>
+    </nav>
+  </div>
+</footer>
+<dialog class="lightbox" aria-label="Screenshot"><img alt=""><button class="lightbox-close" aria-label="Close">×</button></dialog>
+</body>
+</html>

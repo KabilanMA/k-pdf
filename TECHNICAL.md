@@ -140,6 +140,10 @@ Built on Ubuntu 22.04, it runs on Linux systems from 2022 on.
 - `packaging/windows/package.sh` builds the Windows one (in Git Bash);
 - `packaging/macos/bundle.sh` builds the macOS one.
 
+Each release also updates the website (see *Website* below): the release workflow's last job starts the Website workflow, which links the download buttons to the new files and adds a news post.
+
+The release files are named after the version in `Cargo.toml` (`k-pdf-<version>-…`), not the tag, so bump the version there before tagging. The website finds the downloads by how their names end, so it works either way.
+
 ### Usage
 
 ```sh
@@ -433,6 +437,12 @@ The default build includes compression, which compiles two C libraries (libdefla
 | `packaging/make-icons.py` | Makes the `.ico`, `.icns` and window icon from `packaging/linux/k-pdf.svg` |
 | `bench/bench.py` | Benchmark against MuPDF, poppler, Ghostscript (and qpdf and desktop viewers when installed); draws the charts in `bench/results/` and rewrites the Benchmarks section of README.md |
 | `bench/corpus.txt` | The public documents (TeX Live and R manuals) the benchmark uses |
+| `site/build.py` | Builds the website into `_site/`: fills the pages with the latest release and the news, copies the screenshots, logo and benchmark charts, writes the Atom feed |
+| `site/layout.html`, `site/pages/` | The website's shared header and footer, and its pages (home, guide, news) |
+| `site/static/` | Stylesheet, script and screenshots (`images/<scene>-light.webp` / `-dark.webp`) |
+| `site/news.json` | Hand-written news posts (releases become posts by themselves) |
+| `site/screenshots/` | Makes the screenshots: sample documents (LaTeX), `make.sh`, and the scripted scenes in `scenes.py` |
+| `.github/workflows/pages.yml` | Builds the website and publishes it on GitHub Pages |
 | `viewer/src/theme.rs` | Dark and light palettes, styling, the system UI font |
 | `viewer/src/icons.rs` | Vector toolbar icons and buttons |
 
@@ -470,6 +480,16 @@ python3 bench/bench.py --report-only      # redraw charts and README from result
 ```
 
 It needs Python 3 with matplotlib, numpy and Pillow, and GNU time (`/usr/bin/time`) for memory: the max RSS that `wait4` reports for a child also counts the memory of the parent that forked it, so it would show the script's own size for small tools. Each command runs once to warm the disk cache, then three times; the median time and the highest peak memory are kept. The documents are listed in `bench/corpus.txt`, with optional pages to render.
+
+### Website
+
+The website (`https://<owner>.github.io/k-pdf/`) is built from `site/` by `site/build.py`, which uses only the Python standard library, and published by `.github/workflows/pages.yml`. It has a home page with the downloads for the latest version, a guide with a section and screenshot for each feature, and a news page with an Atom feed (`feed.xml`).
+
+- **Releases update it by themselves.** The Release workflow ends by starting the Website workflow on master. That workflow reads the releases through the GitHub API, points the download buttons at the newest release's files, shows "k-pdf X is out" at the top of the home page, and adds a post to the news. The post shows the release notes written on GitHub; when they are only GitHub's "Full Changelog" link, it lists the commit messages since the previous tag. Editing, publishing or deleting a release by hand on GitHub rebuilds the site too. Pages accepts deployments only from master, so runs started by a release (which run on the tag) start a new run on master instead of deploying.
+- **Other changes:** pushing changes to `site/`, `bench/results/` or the icon to master rebuilds it. Hand-written news goes in `site/news.json` (`id`, `date`, `title`, `body` in Markdown).
+- **Setup (once):** Settings → Pages → Build and deployment → Source: *GitHub Actions*.
+- **Locally:** `python3 site/build.py --out _site && python3 -m http.server -d _site` (add `--releases releases.json`, saved from `https://api.github.com/repos/<owner>/k-pdf/releases`, to see the version and news).
+- **Screenshots:** `site/screenshots/make.sh [dark|light|both] [scene …]` rebuilds them after UI changes. It builds the viewer with the `script` feature, makes made-up sample documents (an article and a form from LaTeX, a synthetic phone photo, a password-protected copy) in `target/site-shots/`, and replays the scenes in `scenes.py` with `HOME` in that folder, so nothing personal (file names, reading positions, the comment author) ends up on the website. Each scene is taken in both themes; the light theme is chosen through the ⋯ menu, so views without it (the start screen and the password prompt) exist in dark only. When a feature is added, add a section to `site/pages/guide.html` and, if useful, a scene.
 
 ### Known limitations (planned for later phases)
 - **Password-protected PDFs:** only the standard (password) security handler; files encrypted for certain people with certificates can't be opened. AES-256 passwords aren't SASLprep-normalized (plain passwords are unaffected; unusual Unicode ones may not match). The owner's permissions (no printing, no copying, …) aren't enforced, as in most open-source readers. Protection can't be added to or changed on a file, only kept or (with the CLI's `decrypt`) removed.

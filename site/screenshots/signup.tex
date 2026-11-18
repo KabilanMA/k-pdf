@@ -1,0 +1,32 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=2.6cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\begin{document}
+\begin{Form}
+{\LARGE\bfseries Walking Club}\\[4pt]
+{\large Membership application}\par
+\vspace{6pt}\textcolor{gray}{\rule{\textwidth}{0.6pt}}\par\vspace{14pt}
+
+\TextField[name=fullname,width=11cm,height=16pt,bordercolor={0.6 0.6 0.6}]{Full name\hspace{1.2cm}}\par\vspace{12pt}
+\TextField[name=email,width=11cm,height=16pt,bordercolor={0.6 0.6 0.6}]{Email\hspace{2.12cm}}\par\vspace{12pt}
+\TextField[name=phone,width=6cm,height=16pt,bordercolor={0.6 0.6 0.6}]{Phone\hspace{2.03cm}}\par\vspace{12pt}
+\ChoiceMenu[combo,name=level,width=6cm,height=16pt,bordercolor={0.6 0.6 0.6}]{Experience\hspace{1.2cm}}{Beginner,Regular walker,Mountain leader}\par\vspace{22pt}
+
+{\large\bfseries Which walks interest you?}\par\vspace{10pt}
+\CheckBox[name=day,width=11pt,height=11pt,bordercolor={0.6 0.6 0.6}]{\ Day walks}\hspace{1cm}
+\CheckBox[name=weekend,width=11pt,height=11pt,bordercolor={0.6 0.6 0.6}]{\ Weekend trips}\hspace{1cm}
+\CheckBox[name=winter,width=11pt,height=11pt,bordercolor={0.6 0.6 0.6}]{\ Winter walks}\par\vspace{22pt}
+
+{\large\bfseries Anything we should know?}\par\vspace{8pt}
+\TextField[name=notes,multiline,width=\textwidth,height=3cm,bordercolor={0.6 0.6 0.6}]{}\par\vspace{22pt}
+
+\CheckBox[name=agree,width=11pt,height=11pt,bordercolor={0.6 0.6 0.6}]{\ I agree to follow the club's safety rules.}\par\vspace{36pt}
+
+Signature\hspace{1cm}\rule{7cm}{0.4pt}\hspace{1cm}Date\hspace{0.5cm}\rule{3.5cm}{0.4pt}
+\end{Form}
+\end{document}

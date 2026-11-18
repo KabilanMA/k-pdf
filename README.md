@@ -6,6 +6,8 @@
 
 A fast, lightweight PDF viewer and editor for Linux, Windows and macOS.
 
+**Website, downloads and the illustrated guide: [kabilanma.github.io/k-pdf](https://kabilanma.github.io/k-pdf/)**
+
 ## What it does
 
 - **Read** — smooth scrolling, page thumbnails, zoom, clickable links, and text you can select and copy.
@@ -314,7 +316,7 @@ On Linux, `packaging/linux/install.sh --link` adds it to your applications menu,
 
 To find words in images, also run `packaging/fetch-ocr-models.sh` once: it downloads the text-recognition models (about 12 MB), which the release downloads already include.
 
-How k-pdf works inside, how to build releases, the test results and the known limitations are in the [technical documentation](TECHNICAL.md).
+How k-pdf works inside, how to build releases and the website, the test results and the known limitations are in the [technical documentation](TECHNICAL.md).
 
 ## License
 

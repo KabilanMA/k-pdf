@@ -42,3 +42,6 @@ flamegraph.svg
 # Release archives (packaging/linux/package.sh)
 /dist/
 /playground/
+
+# The website, built by site/build.py
+/_site/
